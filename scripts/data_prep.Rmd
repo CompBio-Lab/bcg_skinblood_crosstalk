@@ -33,7 +33,7 @@ clinical <- clinical[, keep_clinical_var]
 ## dermatoscope images
 
 ```{r}
-dermatoscopic_images <- read.csv(here::here("data", "raw", "alexnet_images.csv"), row.names = 1)[rownames(clinical), ]
+dermatoscopic_images <- read.csv(here::here("data", "raw", "dermatoscope", "alexnet_images.csv"), row.names = 1)[rownames(clinical), ]
 colnames(dermatoscopic_images) <- make.unique(colnames(dermatoscopic_images))
 all(rownames(clinical) == rownames(dermatoscopic_images))
 ```
