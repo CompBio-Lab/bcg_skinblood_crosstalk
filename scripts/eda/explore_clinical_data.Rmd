@@ -1,0 +1,74 @@
+---
+title: "clinical data exploration"
+author: "Amrit Singh"
+date: "June 30, 2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+```
+
+## clinical
+
+```{r}
+clinical <- readRDS(here::here("data", "processed", "clinical.rds"))
+```
+
+```{r}
+clinical %>% 
+  ggplot(aes(x = datebloodcollection, y = studynumber, group = studynumber, color=Vaccination)) +
+  geom_point() +
+  geom_line() + theme(axis.text.x = element_text(angle = 30,
+            hjust = 1, vjust = 1, size = 9, color = "black"))
+```
+
+
+```{r}
+clinical %>% 
+  mutate(timepoint = factor(ifelse(visit == "BASELINE", 0, Day))) %>% 
+  ggplot(aes(x = datebloodcollection, y = studynumber, 
+             group = studynumber, color=timepoint)) +
+  geom_point() +
+  geom_line() + theme(axis.text.x = element_text(angle = 30,
+            hjust = 1, vjust = 1, size = 9, color = "black"))
+```
+
+## Sample breakdown
+
+```{r}
+n_sample <- clinical %>% 
+  group_by(timepoint, Vaccination) %>% 
+  summarise(count = n()) %>% 
+  spread(Vaccination, count)
+n_sample
+```
+
+## Date of blood collection (color by vaccination and timepoint)
+
+```{r}
+participant_lvls <- c("SITU018", "SITU019", "SITU009", "SITU001", "SITU011", "SITU014", "SITU015", "SITU016", "SITU017", "SITU005", "SITU006", "SITU007", "SITU008", "SITU010", "SITU012", "SITU013", "SITU002", "SITU003", "SITU004")
+study_design <- clinical %>% 
+  mutate(timepoint = factor(ifelse(visit == "BASELINE", 0, Day))) %>% 
+  mutate(Participant = factor(studynumber, participant_lvls)) %>% 
+  ggplot(aes(x = datebloodcollection, y = Participant, 
+             group = Participant, color=timepoint, shape=visit)) +
+  geom_point() + 
+  theme_bw() +
+  geom_line() + theme(axis.text.x = element_text(angle = 30,
+            hjust = 1, vjust = 1, size = 9, color = "black")) +
+  facet_wrap(~Vaccination) +
+  xlab("Sample Collection") +
+  ylab("Participant")
+study_design
+```
+
+# Save outputs
+
+```{r}
+saveRDS(n_sample, here::here("results", "eda", "n_sample.rds"))
+saveRDS(study_design, here::here("results", "eda", "study_design.rds"))
+```
+

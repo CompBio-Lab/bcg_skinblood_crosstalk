@@ -1,0 +1,770 @@
+---
+title: "Differential gene expression analysis of spatial skin data"
+author: "Amrit Singh"
+date: "June 30, 2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(limma)
+library(fgsea)
+library(GSVA)
+library(UpSetR)
+
+source(here::here("scripts", "de", "de_helperfunctions.R"))
+geom_eset <- readRDS(here::here("data", "processed", "geomx_eset.rds"))
+phenodata <- geom_eset$phenodata
+q3norm <- geom_eset$eset
+```
+
+# differential expression analysis
+
+## Vaccine - all segments
+
+```{r}
+segments <- c("Full ROI", "CD3", "CD31", "CD68")
+pdata <- phenodata
+eset <- q3norm
+gp <- "type_day"
+lvls <- c("Placebo", "BCG_Day1", "BCG_Day7", "BCG_Day14")
+cts <- c("BCG_Day1-Placebo", "BCG_Day7-BCG_Day1", "BCG_Day14-BCG_Day7")
+tissue <- c("Epidermis", "Dermis+Hypodermis")
+
+top_vacc <- de_analysis(segments, pdata, eset, gp, lvls, cts, tissue)
+top_vacc$contrast <- as.character(top_vacc$contrast)
+top_vacc$contrast[top_vacc$contrast == "BCG_Day1-Placebo"] <- "Placebo vs. BCG-Day1"
+top_vacc$contrast[top_vacc$contrast == "BCG_Day7-BCG_Day1"] <- "BCG-Day1 vs. BCG-Day7"
+top_vacc$contrast[top_vacc$contrast == "BCG_Day14-BCG_Day7"] <- "BCG-Day7 vs. BCG-Day14"
+p1 <- plot_de(top = top_vacc, cts = c("Placebo vs. BCG-Day1", "BCG-Day1 vs. BCG-Day7", "BCG-Day7 vs. BCG-Day14"), tissue_lvls = tissue)
+ggsave(here::here("results", "de", "DEgenes_vaccine_all.png"), 
+       p1, height = 4)
+p1
+```
+## Vaccine - Full ROI
+
+```{r}
+top_vacc_full_roi <- subset(top_vacc, segment == "Full ROI")
+p2 <- plot_de(top = top_vacc_full_roi, cts = c("Placebo vs. BCG-Day1", "BCG-Day1 vs. BCG-Day7", "BCG-Day7 vs. BCG-Day14"), tissue_lvls = tissue) +
+  theme(legend.position = "right")
+ggsave(here::here("results", "de", "DEgenes_vaccine_fullROI.png"), 
+       p2, height = 4, width = 5)
+p2
+```
+
+```{r}
+top_vacc %>% 
+  filter(segment == "Full ROI") %>% 
+    filter(adj.P.Val < 0.1) %>% 
+  mutate(FC = ifelse(logFC > 0, "up", "down")) %>% 
+  group_by(contrast, tissue) %>% 
+  summarise(n = n())
+
+top_vacc %>% 
+  filter(segment == "Full ROI") %>% 
+    filter(adj.P.Val < 0.1) %>% 
+  mutate(FC = ifelse(logFC > 0, "up", "down")) %>% 
+  group_by(contrast, FC, tissue) %>% 
+  summarise(n = n())
+```
+
+
+## save vaccine toptable
+
+```{r}
+saveRDS(top_vacc, here::here("results", "de", "top_vacc.rds"))
+saveRDS(top_vacc_full_roi, here::here("results", "de", "top_vacc_full_roi.rds"))
+```
+
+### volcano plots
+
+```{r}
+
+placebo_vs_bcg <- top_vacc %>% 
+  filter(segment == "Full ROI", contrast == "Placebo vs. BCG-Day1") %>% 
+  mutate(logp = -log10(P.Value),
+         Significance = ifelse(adj.P.Val < 0.1, "BH-FDR<10%", "Not-significant"))
+placebo_vs_bcg$tissue <- factor(placebo_vs_bcg$tissue, levels = c("Epidermis", "Dermis+Hypodermis"))
+p <- placebo_vs_bcg %>%
+  ggplot(aes(x=logFC, y= logp, color=Significance, label=feature)) +
+  geom_point() +
+  ggrepel::geom_text_repel(data = filter(placebo_vs_bcg,
+                                         adj.P.Val < 0.01), max.overlaps = 20) + 
+  facet_grid(contrast~tissue, scales = "free") +
+  theme_classic() +
+  scale_color_manual(values=c("#0072B2", "#999999")) +
+  scale_x_continuous(expression("log"[2]~"Fold-change")) +
+  scale_y_continuous(expression("-log"[10]~"P-value")) +  
+  theme(
+      strip.text.x = element_text(size = 12),
+      strip.text.y = element_text(size = 12)
+      )
+ggsave(here::here("results", "de", "diffexp_placebo_vs_bcgday1.png"), p, height = 5, width = 7)
+p
+```
+
+
+
+## overlap between significant genes
+
+```{r}
+fdr=0.1
+int <- top_vacc_full_roi %>% 
+  filter(adj.P.Val < fdr) %>% 
+  mutate(FC = ifelse(logFC > 0, "UP", "DOWN")) %>% 
+  mutate(name = paste(contrast, " \n (", tissue, "-", FC, ")", sep=""))
+.list <- split(int$feature, int$name)
+.list <- .list[c("Placebo vs. BCG-Day1 \n (Epidermis-UP)",
+                                        "Placebo vs. BCG-Day1 \n (Epidermis-DOWN)",
+                                        "Placebo vs. BCG-Day1 \n (Dermis+Hypodermis-UP)",
+                                        "Placebo vs. BCG-Day1 \n (Dermis+Hypodermis-DOWN)",
+                                        "BCG-Day1 vs. BCG-Day7 \n (Epidermis-UP)")]
+
+## BCG-Day1 vs. BCG-Day7 (Epidermis-UP) - Placebo vs. BCG-Day1 (Dermis+Hypodermis-UP) - Placebo vs. BCG-Day1 (Epidermis-UP)
+a=Reduce(intersect, list(.list$`BCG-Day1 vs. BCG-Day7 \n (Epidermis-UP)`,
+                       .list$`Placebo vs. BCG-Day1 \n (Dermis+Hypodermis-UP)`,
+                       .list$`Placebo vs. BCG-Day1 \n (Epidermis-UP)`))
+a
+## BCG-Day1 vs. BCG-Day7 (Epidermis-UP) - Placebo vs. BCG-Day1 (Epidermis-UP)
+b=setdiff(intersect(.list$`BCG-Day1 vs. BCG-Day7 \n (Epidermis-UP)`, .list$`Placebo vs. BCG-Day1 \n (Epidermis-UP)`), a)
+b
+## BCG-Day1 vs. BCG-Day7 (Epidermis-UP) - Placebo vs. BCG-Day1 (Epidermis-DOWN)
+c=setdiff(intersect(.list$`BCG-Day1 vs. BCG-Day7 \n (Epidermis-UP)`, .list$`Placebo vs. BCG-Day1 \n (Epidermis-DOWN)`), a)
+c
+## Placebo vs. BCG-Day1 (Dermis+Hypodermis-UP) - Placebo vs. BCG-Day1 (Epidermis-DOWN)
+d=intersect(.list$`Placebo vs. BCG-Day1 \n (Dermis+Hypodermis-UP)`, .list$`Placebo vs. BCG-Day1 \n (Epidermis-DOWN)`)
+d
+## BCG-Day1 vs. BCG-Day7 (Epidermis-UP)
+e=setdiff(.list$`BCG-Day1 vs. BCG-Day7 \n (Epidermis-UP)`, 
+          unique(c(a, b, c)))
+
+png(here::here("results", "de", "DEgenes_vaccine_fullROI_upset.png"),
+    units="in", height = 5, width = 5, res=150)
+upset(fromList(.list))
+dev.off()
+
+
+
+```
+
+
+## plot genes
+
+```{r}
+df_logfc <- top_vacc_full_roi %>% 
+  filter(feature %in% c(e, c, b, d, a)) %>% 
+  mutate(cont_tis = paste(contrast, tissue, sep=",")) %>% 
+  dplyr::select(cont_tis, feature, logFC) %>% 
+  spread(cont_tis, logFC)
+df_padj <- top_vacc_full_roi %>% 
+  filter(feature %in% c(e, c, b, d, a)) %>% 
+  mutate(cont_tis = paste(contrast, tissue, sep=",")) %>% 
+  dplyr::select(cont_tis, feature, adj.P.Val) %>% 
+  spread(cont_tis, adj.P.Val)
+
+cts_tissue_ord <- c("Placebo vs. BCG-Day1,Epidermis", "BCG-Day1 vs. BCG-Day7,Epidermis", 
+                    "BCG-Day7 vs. BCG-Day14,Epidermis", "Placebo vs. BCG-Day1,Dermis+Hypodermis",
+                    "BCG-Day1 vs. BCG-Day7,Dermis+Hypodermis",
+                    "BCG-Day7 vs. BCG-Day14,Dermis+Hypodermis")
+tissues <- c("Epidermis", "Dermis+Hypodermis")
+cts <- c("Placebo vs. BCG-Day1", "BCG-Day1 vs. BCG-Day7", "BCG-Day7 vs. BCG-Day14")
+ht_cols <- list(Comparison = c("Placebo vs. BCG-Day1"="#999999", 
+                               "BCG-Day1 vs. BCG-Day7"="#E69F00", 
+                               "BCG-Day7 vs. BCG-Day14" = "#56B4E9"),
+                Tissue = c("Epidermis" = "#009E73", 
+                           "Dermis+Hypodermis" = "#0072B2"))
+
+logfc <- as.matrix(df_logfc[, -1])
+rownames(logfc) <- df_logfc$feature
+logfc <- logfc[c(e, c, b, d, a),cts_tissue_ord]
+padj <- as.matrix(df_padj[, -1])
+rownames(padj) <- df_padj$feature
+padj <- padj[c(e, c, b, d, a),cts_tissue_ord]
+
+cont <- sapply(strsplit(colnames(logfc), ","), function(i){i[[1]]})
+tis <- sapply(strsplit(colnames(logfc), ","), function(i){i[[2]]})
+col_ha <- columnAnnotation(Tissue = factor(tis, levels = tissues),
+                           Comparison = factor(cont, levels = cts),
+                           col = ht_cols)
+colnames(logfc) <- NULL
+row_labels = paste0("*", rownames(logfc), "*")
+htmp <- Heatmap(logfc, name = "fold-change",
+                top_annotation = col_ha,
+                row_title_rot = 0,
+                border = TRUE,
+                row_labels = gt_render(row_labels),
+                row_split = factor(rep(c("e", "c", "b", "d", "a"),
+                                sapply(list(e, c, b, d, a), length)),
+                                levels = c("e", "c", "b", "d", "a")),
+                cluster_columns = FALSE,
+                cluster_rows = FALSE,
+                width = ncol(logfc)*unit(8, "mm"),
+                heatmap_legend_param = list(
+                  legend_direction = "horizontal",
+                  legend_width = unit(3, "cm")),
+                cell_fun = function(j, i, x, y, width, height, fill) {
+                  if(padj[i, j] < fdr)
+                    grid.text("*", x, y, gp = gpar(fontsize = 15))
+                })
+
+png(here::here("results", "de", "DEgenes_vaccine_fullROI_upset_genes.png"),
+    units="in", height = 6, width = 6, res=150)
+draw(htmp, heatmap_legend_side="bottom",
+     annotation_legend_side="left",
+     legend_grouping = "original")
+dev.off()
+
+```
+
+
+## Bacterial status
+
+```{r}
+segments <- c("Full ROI", "CD3", "CD31", "CD68")
+pdata <- phenodata
+pdata$bacteria[grep("placebo", pdata$type)] <- "Placebo"
+eset <- q3norm
+gp <- "bacteria"
+lvls <- c("Placebo", "neg", "pos")
+cts <- c("pos-Placebo", "neg-Placebo", "pos-neg")
+tissue <- c("Epidermis", "Dermis+Hypodermis")
+
+top_bac <- de_analysis(segments, pdata, eset, gp, lvls, cts, tissue)
+p3 <- plot_de(top = top_bac, cts, tissue_lvls = tissue)
+ggsave(here::here("results", "de", "DEgenes_bacteria.png"), 
+       p3, height = 4)
+p3
+```
+
+# Gene set enrichment analysis
+
+## import gene sets
+
+```{r}
+dbs <- readRDS(here::here("data", "annotations", "dbs.rds"))
+```
+
+## vaccination status
+
+```{r}
+tissues <- c("Epidermis", "Dermis+Hypodermis")
+segments <- c("Full ROI", "CD3", "CD31", "CD68")
+top_vaccine_db <- gsea2(top = top_vacc, segments, tissues, dbs)
+top_vaccine_db$contrast <- as.character(top_vaccine_db$contrast)
+top_vaccine_db$contrast <- factor(top_vaccine_db$contrast, c("Placebo vs. BCG-Day1", "BCG-Day1 vs. BCG-Day7", "BCG-Day7 vs. BCG-Day14"))
+p4 <- plot_gsea(top = top_vaccine_db, cts, tissue_lvls = tissues)
+ggsave(here::here("results", "de", "DEgenesets_vaccine_all.png"), 
+       p4, height = 4, width = 9)
+saveRDS(top_vaccine_db, here::here("results", "de", "top_vaccine_db.rds"))
+p4
+```
+
+## Vaccine - Full ROI
+
+```{r}
+top_vaccine_fullroi <- top_vaccine_db %>% 
+  filter(segment == "Full ROI")
+my_colors <- c("#999999", "#E69F00", "#56B4E9")
+names(my_colors) <- levels(top_vaccine_db $contrast)
+top_vaccine_fullroi$DB[top_vaccine_fullroi$DB == "kegg"] <- "KEGG"
+top_vaccine_fullroi$DB[top_vaccine_fullroi$DB == "wiki"] <- "WikiPathways"
+top_vaccine_fullroi$DB[top_vaccine_fullroi$DB == "skincells"] <- "Cell-types in skin"
+p5 <-  top_vaccine_fullroi %>%
+    group_by(DB, contrast, tissue, segment) %>%
+    arrange(padj) %>%
+    mutate(n = 1:n()) %>%
+    mutate(tissue = factor(tissue, c("Epidermis", "Dermis+Hypodermis"))) %>%
+    ggplot(aes(x = n, y = padj, color = contrast)) +
+    geom_line() +
+    facet_grid(tissue~DB, scales = "free") +
+    # scale_x_continuous(trans="log2") +
+    geom_hline(yintercept = 0.05, col = 'grey', linetype = "dashed") +
+    xlab("Number of signficant genesets") +
+    ylab("BH-FDR") +
+    theme_classic() +
+    scale_color_manual(name = "Contrasts", values = my_colors) +
+    theme(legend.position = "none")
+ggsave(here::here("results", "de", "DEgenesets_vaccine_fullROI_all.png"), 
+       p5, height = 4, width = 5)
+p5
+```
+
+### KEGG genesets
+
+```{r}
+tissues = c("Epidermis", "Dermis+Hypodermis")
+top_vaccine_kegg <- top_vaccine_db %>% 
+  filter(segment != "Full ROI")
+p6 <- plot_gsea(top = top_vaccine_kegg, cts, tissue_lvls = tissues)
+ggsave(here::here("results", "de", "DEgenesets_vaccine_kegg.png"), 
+       p6, height = 4, width = 9)
+p6
+```
+
+## bacteria status
+
+```{r}
+tissues <- c("Epidermis", "Dermis+Hypodermis")
+segments <- c("Full ROI", "CD3", "CD31", "CD68")
+top_bacteria_db <- gsea2(top = top_bac, segments, tissues, dbs)
+p7 <- plot_gsea(top = top_bacteria_db, cts, tissue_lvls = tissues)
+ggsave(here::here("results", "de", "DEgenesets_bacteria_all.png"), 
+       p7, height = 4, width = 9)
+saveRDS(top_bacteria_db, here::here("results", "de", "top_bacteria_db.rds"))
+p7
+```
+
+### Heatmap of cells
+
+#### cells
+
+```{r}
+top <- top_vaccine_db
+db <- "panglaodb"
+seg <- "Full ROI"
+cutoff <- 0.1
+cts_tissue_ord <- c("Placebo vs. BCG-Day1,Epidermis", "BCG-Day1 vs. BCG-Day7,Epidermis", 
+                    "BCG-Day7 vs. BCG-Day14,Epidermis", "Placebo vs. BCG-Day1,Dermis+Hypodermis",
+                    "BCG-Day1 vs. BCG-Day7,Dermis+Hypodermis",
+                    "BCG-Day7 vs. BCG-Day14,Dermis+Hypodermis")
+tissues <- c("Epidermis", "Dermis+Hypodermis")
+cts <- c("Placebo vs. BCG-Day1", "BCG-Day1 vs. BCG-Day7", "BCG-Day7 vs. BCG-Day14")
+ht_cols <- list(Comparison = c("Placebo vs. BCG-Day1"="#999999", 
+                               "BCG-Day1 vs. BCG-Day7"="#E69F00", 
+                               "BCG-Day7 vs. BCG-Day14" = "#56B4E9"),
+                Tissue = c("Epidermis" = "#009E73", 
+                           "Dermis+Hypodermis" = "#0072B2"))
+
+top_sig <- top %>%
+  filter(DB == db, segment == seg, padj < cutoff)
+
+ann <- dbs[[db]] %>%
+  dplyr::select(-data) %>%
+  as.data.frame()
+rownames(ann) <- ann$pathway
+
+nes0 <- top %>%
+  filter(DB == db, segment == seg, pathway %in% unique(top_sig$pathway)) %>%
+  mutate(comp_tissue = paste(contrast, tissue, sep=",")) %>%
+  arrange(tissue) %>%
+  dplyr::select(pathway, NES, comp_tissue) %>%
+  spread(comp_tissue, NES, fill = 0)
+nes = nes0[, cts_tissue_ord]
+rownames(nes) <- nes0$pathway
+padj0 <- top %>%
+  filter(DB == db, segment == seg, pathway %in% unique(top_sig$pathway)) %>%
+  mutate(comp_tissue = paste(contrast, tissue, sep=",")) %>%
+  arrange(tissue) %>%
+  dplyr::select(pathway, padj, comp_tissue) %>%
+  spread(comp_tissue, padj, fill = 1)
+padj = padj0[, cts_tissue_ord]
+rownames(padj) <- padj0$pathway
+all(colnames(nes) == colnames(padj))
+cont <- sapply(strsplit(colnames(nes), ","), function(i){i[[1]]})
+tis <- sapply(strsplit(colnames(nes), ","), function(i){i[[2]]})
+col_ha <- columnAnnotation(Tissue = factor(tis, levels = tissues),
+                           Comparison = factor(cont, levels = cts),
+                           col = ht_cols)
+colnames(nes) <- NULL
+
+htmp <- Heatmap(nes, name = "NES",
+                top_annotation = col_ha,
+                row_split = ann[rownames(nes),"organ"],
+                row_title_rot = 0,
+                cluster_columns = FALSE,
+                border = TRUE,
+                width = ncol(nes)*unit(8, "mm"),
+                heatmap_legend_param = list(
+                  legend_direction = "horizontal",
+                  legend_width = unit(4, "cm")),
+                cell_fun = function(j, i, x, y, width, height, fill) {
+                  if(padj[i, j] < cutoff)
+                    grid.text("*", x, y, gp = gpar(fontsize = 15))
+                })
+
+png(file=here::here("results", "de", "heatmap_vaccine_cells.png"),
+    height = 7, width = 20, units = "in", res = 200)
+draw(htmp, heatmap_legend_side="bottom",
+     annotation_legend_side="left",
+     legend_grouping = "original")
+dev.off()
+```
+
+### plot GSEA results for fibroblasts
+
+```{r}
+seg = "Full ROI"
+tissues = c("Epidermis", "Dermis+Hypodermis")
+db <- lapply(dbs$panglaodb$data, function(i){as.character(unlist(i))})
+names(db) <- dbs$panglaodb$pathway
+geneset = "Fibroblasts"
+fib <- plot_geneset(top = top_vacc, seg, tissues, db, geneset)
+
+ggsave(here::here("results", "de", "fibroblasts.png"), 
+       fib, height = 4, width = 13)
+fib
+```
+
+### plot GSEA results for Macrophages
+
+```{r}
+geneset = "Macrophages"
+macro <- plot_geneset(top = top_vacc, seg, tissues, db, geneset)
+
+ggsave(here::here("results", "de", "macrophages.png"), 
+       macro, height = 4, width = 12, dpi = 1000)
+macro
+```
+
+### plot of "Neutrophils" genes - Placebo vs. BCG-Day1
+
+```{r}
+db <- lapply(dbs$panglaodb$data, unlist)
+names(db) <- dbs$panglaodb$pathway
+
+neu_placebo_bcgday1 <- top_vacc %>% 
+  filter(feature %in% unique(unlist(db["Neutrophils"]))) %>% 
+  filter(abs(logFC) > 0.5) %>% 
+  filter(segment == "Full ROI", contrast == "Placebo vs. BCG-Day1", tissue == "Epidermis") %>% 
+  ggplot(aes(x = reorder(feature, -logFC), y = logFC)) +
+  geom_bar(stat = "identity", fill="red", alpha=0.8) +
+  customTheme(sizeStripFont=10, xAngle=90, hjust=1, vjust=0.5, xSize=15,
+                       ySize=15, xAxisSize=15, yAxisSize=15) +
+  xlab("Neutrophils genes") +
+  ylab("Fold-Change") +
+  geom_hline(yintercept = 0, linetype="dashed")
+
+ggsave(here::here("results", "de", "neu_placebo_bcgday1.png"), 
+       neu_placebo_bcgday1, height = 4, width = 9)
+
+neu_placebo_bcgday1
+```
+
+### plot of Neutrophils genes - BCG-Day7 vs. BCG-Day14
+
+```{r}
+neu_bcgday7_bcgday14 <- top_vacc %>% 
+  filter(feature %in% unique(unlist(db["Neutrophils"]))) %>% 
+  filter(abs(logFC) > 0.5) %>% 
+  filter(segment == "Full ROI", contrast == "BCG-Day7 vs. BCG-Day14", tissue == "Epidermis") %>% 
+  ggplot(aes(x = reorder(feature, -logFC), y = logFC)) +
+  geom_bar(stat = "identity", fill="purple", alpha=0.5) +
+  customTheme(sizeStripFont=10, xAngle=90, hjust=1, vjust=0.5, xSize=15,
+                       ySize=15, xAxisSize=15, yAxisSize=15) +
+  xlab("Neutrophils genes") +
+  ylab("Fold-Change") +
+  geom_hline(yintercept = 0, linetype="dashed")
+
+ggsave(here::here("results", "de", "neu_bcgday7_bcgday14.png"), 
+       neu_bcgday7_bcgday14, height = 4, width = 9)
+
+neu_bcgday7_bcgday14
+```
+
+
+## Neutrophil genes
+
+```{r}
+top_vacc$contrast <- factor(top_vacc$contrast, c("Placebo vs. BCG-Day1",
+                                                 "BCG-Day1 vs. BCG-Day7",
+                                                 "BCG-Day7 vs. BCG-Day14"))
+neu_genes <- top_vacc %>% 
+  filter(feature %in% unique(unlist(db["Neutrophils"]))) %>% 
+  filter(abs(logFC) > 0.5) %>% 
+  filter(segment == "Full ROI", contrast != "BCG-Day1 vs. BCG-Day7", tissue == "Epidermis")
+
+neu_all <- top_vacc %>% 
+  filter(feature %in% unique(neu_genes$feature)) %>% 
+  filter(segment == "Full ROI", contrast != "BCG-Day1 vs. BCG-Day7", tissue == "Epidermis") %>% 
+  ggplot(aes(y = reorder(feature, -logFC), x = logFC, fill=contrast)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  customTheme(sizeStripFont=10, xAngle=90, hjust=1, vjust=0.5, xSize=15,
+                       ySize=15, xAxisSize=15, yAxisSize=15) +
+  ylab("Neutrophils genes") +
+  xlab("Fold-Change") +
+  geom_hline(yintercept = 0, linetype="dashed") +
+  scale_fill_manual(values=c("Placebo vs. BCG-Day1"="#999999", 
+                               "BCG-Day1 vs. BCG-Day7"="#E69F00", 
+                               "BCG-Day7 vs. BCG-Day14" = "#56B4E9")) +
+    theme( # remove the vertical grid lines
+           panel.grid.major.x = element_blank() ,
+           # explicitly set the horizontal lines (or they will disappear too)
+           panel.grid.major.y = element_line( size=.1, color="black" ) 
+    ) +
+  theme(axis.text.y = element_text(face = "italic"))
+
+ggsave(here::here("results", "de", "neu_all.png"), 
+       neu_all, height = 8, width = 6)
+neu_all
+```
+
+
+### Heatmap of pathways
+
+## Full ROI
+
+#### kegg
+
+```{r}
+level2_colors <- readRDS(here::here("results", "de", "kegg_colors.rds"))
+
+top <- top_vaccine_db
+db <- "kegg"
+seg <- "Full ROI"
+cutoff <- 0.01
+cts_tissue_ord <- c("Placebo vs. BCG-Day1,Epidermis", "BCG-Day1 vs. BCG-Day7,Epidermis", 
+                    "BCG-Day7 vs. BCG-Day14,Epidermis", "Placebo vs. BCG-Day1,Dermis+Hypodermis",
+                    "BCG-Day1 vs. BCG-Day7,Dermis+Hypodermis",
+                    "BCG-Day7 vs. BCG-Day14,Dermis+Hypodermis")
+tissues <- c("Epidermis", "Dermis+Hypodermis")
+cts <- c("Placebo vs. BCG-Day1", "BCG-Day1 vs. BCG-Day7", "BCG-Day7 vs. BCG-Day14")
+ht_cols <- list(Comparison = c("Placebo vs. BCG-Day1"="#999999", 
+                               "BCG-Day1 vs. BCG-Day7"="#E69F00", 
+                               "BCG-Day7 vs. BCG-Day14" = "#56B4E9"),
+                Tissue = c("Epidermis" = "#009E73", 
+                           "Dermis+Hypodermis" = "#0072B2"))
+
+top_sig <- top %>%
+  filter(DB == db, segment == seg, padj < cutoff)
+
+top_sig %>% 
+  mutate(FC = ifelse(NES >0, "up", "down")) %>% 
+  group_by(contrast, tissue, FC) %>% 
+  summarise(n = n()) %>% 
+  spread(contrast, n)
+
+ann <- dbs[[db]] %>%
+  dplyr::select(-data) %>%
+  as.data.frame()
+rownames(ann) <- ann$pathway
+
+
+nes0 <- top %>%
+  filter(DB == db, segment == seg, pathway %in% unique(top_sig$pathway)) %>%
+  mutate(comp_tissue = paste(contrast, tissue, sep=",")) %>%
+  arrange(tissue) %>%
+  dplyr::select(pathway, NES, comp_tissue) %>%
+  spread(comp_tissue, NES, fill = 0)
+nes = nes0[, cts_tissue_ord]
+rownames(nes) <- nes0$pathway
+padj0 <- top %>%
+  filter(DB == db, segment == seg, pathway %in% unique(top_sig$pathway)) %>%
+  mutate(comp_tissue = paste(contrast, tissue, sep=",")) %>%
+  arrange(tissue) %>%
+  dplyr::select(pathway, padj, comp_tissue) %>%
+  spread(comp_tissue, padj, fill = 1)
+padj = padj0[, cts_tissue_ord]
+rownames(padj) <- padj0$pathway
+all(colnames(nes) == colnames(padj))
+cont <- sapply(strsplit(colnames(nes), ","), function(i){i[[1]]})
+tis <- sapply(strsplit(colnames(nes), ","), function(i){i[[2]]})
+row_ha <- rowAnnotation(level=ann[rownames(nes), "level2"],
+                        col = list(level = level2_colors))
+col_ha <- columnAnnotation(Tissue = factor(tis, levels = tissues),
+                           Comparison = factor(cont, levels = cts),
+                           col = ht_cols)
+colnames(nes) <- NULL
+
+rowsplit <- ann[rownames(nes), "level1"]
+rowsplit[rowsplit == "Environmental Information Processing"] <- "Environmental \n Information Processing"
+
+htmp <- Heatmap(nes, name = "NES",
+                right_annotation = row_ha,
+                top_annotation = col_ha,
+                border = TRUE,
+                row_split = rowsplit,
+                row_title_rot = 90,
+                cluster_columns = FALSE,
+                width = ncol(nes)*unit(8, "mm"),
+                heatmap_legend_param = list(
+                  legend_direction = "horizontal",
+                  legend_width = unit(4, "cm")),
+                cell_fun = function(j, i, x, y, width, height, fill) {
+                  if(padj[i, j] < cutoff)
+                    grid.text("*", x, y, gp = gpar(fontsize = 20))
+                })
+
+png(file=here::here("results", "de", "heatmap_vaccine_kegg.png"),
+    height = 15, width = 30, units = "in", res = 200)
+draw(htmp, heatmap_legend_side="bottom",
+     annotation_legend_side="left",
+     legend_grouping = "original")
+dev.off()
+
+
+```
+
+
+```{r}
+cutoff = 0.01
+sig_cc_pathways <- top_vaccine_db %>% 
+  filter(DB == "kegg",
+         segment != "Full ROI",
+         padj < cutoff)
+
+sig_cc_pathways %>% 
+  group_by(segment) %>% 
+  summarise(n=n())
+
+sig_cells <- top_vaccine_db %>% 
+  filter(pathway %in% unique(sig_cc_pathways$pathway))
+# sig_cells <- top_vaccine_db %>% 
+#   filter(DB == "kegg",
+#          padj < cutoff) %>% 
+#   group_by(tissue, contrast, segment) %>% 
+#   arrange(desc(abs(NES))) %>% 
+#   dplyr::slice(1:40)
+
+keep <- c("Placebo vs. BCG-Day1,Epidermis,Full ROI", "BCG-Day1 vs. BCG-Day7,Epidermis,Full ROI", "BCG-Day7 vs. BCG-Day14,Epidermis,Full ROI",
+          "Placebo vs. BCG-Day1,Dermis+Hypodermis,Full ROI", "BCG-Day1 vs. BCG-Day7,Dermis+Hypodermis,Full ROI", "BCG-Day7 vs. BCG-Day14,Dermis+Hypodermis,Full ROI",
+          "BCG-Day1 vs. BCG-Day7,Epidermis,CD3", "BCG-Day7 vs. BCG-Day14,Epidermis,CD3",
+          "BCG-Day1 vs. BCG-Day7,Dermis+Hypodermis,CD3", "BCG-Day7 vs. BCG-Day14,Dermis+Hypodermis,CD3",
+          "BCG-Day1 vs. BCG-Day7,Epidermis,CD31", "BCG-Day7 vs. BCG-Day14,Epidermis,CD31",
+          "BCG-Day1 vs. BCG-Day7,Dermis+Hypodermis,CD31", "BCG-Day7 vs. BCG-Day14,Dermis+Hypodermis,CD31",
+          "BCG-Day1 vs. BCG-Day7,Epidermis,CD68", "BCG-Day7 vs. BCG-Day14,Epidermis,CD68",
+          "BCG-Day1 vs. BCG-Day7,Dermis+Hypodermis,CD68", "BCG-Day7 vs. BCG-Day14,Dermis+Hypodermis,CD68")
+nes0 <- top_vaccine_db %>% 
+  filter(DB == "kegg",
+         pathway %in% unique(sig_cells$pathway)) %>% 
+  mutate(comp_tissue = paste(contrast, tissue, segment, sep=",")) %>% 
+  dplyr::select(pathway, NES, comp_tissue) %>% 
+  spread(comp_tissue, NES, fill = 0)
+nes = nes0[, keep]
+rownames(nes) <- sapply(strsplit(nes0$pathway, "WP"), function(i){ trimws(i[[1]]) })
+
+padj0 <- top_vaccine_db %>% 
+  filter(DB == "kegg",
+         pathway %in% unique(sig_cells$pathway)) %>% 
+  mutate(comp_tissue = paste(contrast, tissue, segment, sep=",")) %>% 
+  dplyr::select(pathway, padj, comp_tissue) %>% 
+  spread(comp_tissue, padj, fill = 1)
+padj = padj0[, keep]
+rownames(padj) <- padj0$pathway
+all(colnames(nes) == colnames(padj))
+
+cont <- sapply(strsplit(colnames(nes), ","), function(i){i[[1]]})
+tis <- sapply(strsplit(colnames(nes), ","), function(i){i[[2]]})
+seg <- sapply(strsplit(colnames(nes), ","), function(i){i[[3]]})
+col_ha <- columnAnnotation(Tissue = factor(tis, levels = c("Epidermis", "Dermis+Hypodermis")),
+                           Comparison = factor(cont, levels = c("Placebo vs. BCG-Day1", "BCG-Day1 vs. BCG-Day7", "BCG-Day7 vs. BCG-Day14")),
+                           col = list(Comparison = c("Placebo vs. BCG-Day1"="#999999", "BCG-Day1 vs. BCG-Day7"="#E69F00", "BCG-Day7 vs. BCG-Day14" = "#56B4E9"),
+                                      Tissue = c("Epidermis" = "#009E73", "Dermis+Hypodermis" = "#0072B2")))
+colnames(nes) <- NULL
+# rownames(nes) <- str_wrap(rownames(nes), width = 35)
+ann <- dbs$kegg %>% 
+  dplyr::select(-data) %>% 
+  as.data.frame()
+rownames(ann) <- ann$pathway
+row_ha <- rowAnnotation(level = ann[rownames(nes), "level2"],
+                        col = list(level = level2_colors))
+
+htmp <- Heatmap(nes, name = "NES",  
+                top_annotation = col_ha,
+                right_annotation = row_ha, 
+                border = TRUE,
+                row_split = ann[rownames(nes), "level1"],
+                row_title = "",
+    row_title_rot = 0,
+        cluster_columns = FALSE,
+        column_split = factor(seg, c("Full ROI", "CD68", "CD3", "CD31")),
+        width = ncol(nes)*unit(8, "mm"),
+        heatmap_legend_param = list(
+    legend_direction = "horizontal", 
+    legend_width = unit(14, "cm")), 
+        cell_fun = function(j, i, x, y, width, height, fill) {
+        if(padj[i, j] < cutoff)
+            grid.text("*", x, y, gp = gpar(fontsize = 15))
+})
+png(file=here::here("results", "de", "heatmap_vaccine_all.png"),
+    height = 9, width = 20, units = "in", res = 300)
+draw(htmp, heatmap_legend_side="bottom", 
+     annotation_legend_side="left",
+           legend_grouping = "original")
+dev.off()
+
+```
+
+## save datasets
+
+```{r}
+## gene-expression data
+cutoff=0.1
+sig_eset_epi <- top_vacc %>% 
+  filter(segment == "Full ROI",
+         tissue == "Epidermis",
+         adj.P.Val < cutoff)
+sig_eset_derm_hypoderm <- top_vacc %>% 
+  filter(segment == "Full ROI",
+         tissue == "Dermis+Hypodermis",
+         adj.P.Val < cutoff)
+
+phenodata_fullroi_epi <- subset(phenodata, segment == "Full ROI" & tissue == "Epidermis")
+phenodata_fullroi_derm_hypoderm <- subset(phenodata, segment ==  "Full ROI" & tissue == "Dermis+Hypodermis")
+epi_geomx_eset0 = q3norm[unique(c(sig_eset_epi$feature, sig_eset_derm_hypoderm$feature)), rownames(phenodata_fullroi_epi)] %>% 
+  t %>% 
+  as.data.frame() %>% 
+  mutate(bis = phenodata_fullroi_epi$bis) %>% 
+  group_by(bis) %>% 
+  dplyr::summarise(across(everything(), mean))
+epi_geomx_eset <- as.matrix(epi_geomx_eset0[, -1])
+rownames(epi_geomx_eset) <- epi_geomx_eset0$bis
+epi_geomx_eset <- epi_geomx_eset[order(rownames(epi_geomx_eset)), ]
+saveRDS(epi_geomx_eset, here::here("results", "de", "epi_geomx_eset_sig.rds"))
+derm_hypoderm_geomx_eset0 = q3norm[unique(c(sig_eset_epi$feature, sig_eset_derm_hypoderm$feature)), rownames(phenodata_fullroi_derm_hypoderm)] %>% 
+  t %>% 
+  as.data.frame() %>% 
+  mutate(bis = phenodata_fullroi_derm_hypoderm$bis) %>% 
+  group_by(bis) %>% 
+  dplyr::summarise(across(everything(), mean))
+derm_hypoderm_geomx_eset <- as.matrix(derm_hypoderm_geomx_eset0[, -1])
+rownames(derm_hypoderm_geomx_eset) <- derm_hypoderm_geomx_eset0$bis
+derm_hypoderm_geomx_eset <- derm_hypoderm_geomx_eset[order(rownames(derm_hypoderm_geomx_eset)), ]
+saveRDS(derm_hypoderm_geomx_eset, here::here("results", "de", "derm_hypoderm_geomx_eset_sig.rds"))
+
+## cells
+cells <- lapply(dbs$panglaodb$data, function(i) as.character(unlist(i)))
+names(cells) <- dbs$panglaodb$pathway
+ccPar <- gsvaParam(q3norm, cells)
+cc.es <- gsva(ccPar, verbose=FALSE)
+
+cutoff=0.1
+sig_cc_epi <- top_vaccine_db %>% 
+  filter(DB == "panglaodb",
+         segment == "Full ROI",
+         tissue == "Epidermis",
+         padj < cutoff)
+sig_cc_derm_hypoderm <- top_vaccine_db %>% 
+  filter(DB == "panglaodb",
+         segment == "Full ROI",
+         tissue == "Dermis+Hypodermis",
+         padj < cutoff)
+phenodata_fullroi_epi <- subset(phenodata, segment == "Full ROI" & tissue == "Epidermis")
+phenodata_fullroi_derm_hypoderm <- subset(phenodata, segment ==  "Full ROI" & tissue == "Dermis+Hypodermis")
+epi_geomx_cc0 = cc.es[unique(c(sig_cc_epi$pathway, sig_cc_derm_hypoderm$pathway)), rownames(phenodata_fullroi_epi)] %>% 
+  t %>% 
+  as.data.frame() %>% 
+  mutate(bis = phenodata_fullroi_epi$bis) %>% 
+  group_by(bis) %>% 
+  dplyr::summarise(across(everything(), mean))
+epi_geomx_cc <- as.matrix(epi_geomx_cc0[, -1])
+rownames(epi_geomx_cc) <- epi_geomx_cc0$bis
+epi_geomx_cc <- epi_geomx_cc[order(rownames(epi_geomx_cc)), ]
+saveRDS(epi_geomx_cc, here::here("results", "de", "epi_geomx_cc_sig.rds"))
+derm_hypoderm_geomx_cc0 = cc.es[unique(c(sig_cc_epi$pathway, sig_cc_derm_hypoderm$pathway)), rownames(phenodata_fullroi_derm_hypoderm)] %>% 
+  t %>% 
+  as.data.frame() %>% 
+  mutate(bis = phenodata_fullroi_derm_hypoderm$bis) %>% 
+  group_by(bis) %>% 
+  dplyr::summarise(across(everything(), mean))
+derm_hypoderm_geomx_cc <- as.matrix(derm_hypoderm_geomx_cc0[, -1])
+rownames(derm_hypoderm_geomx_cc) <- derm_hypoderm_geomx_cc0$bis
+derm_hypoderm_geomx_cc <- derm_hypoderm_geomx_cc[order(rownames(derm_hypoderm_geomx_cc)), ]
+saveRDS(derm_hypoderm_geomx_cc, here::here("results", "de", "derm_hypoderm_geomx_cc_sig.rds"))
+
+```
+
+
+
+

@@ -1,0 +1,93 @@
+---
+title: "cfrna exploration"
+author: "Amrit Singh"
+date: "June 30, 2025"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse);
+library(limma)
+source(here::here("scripts", "eda", "eda_helperfunctions.R"))
+```
+
+# Import data
+## clinical
+
+```{r}
+clinical <- readRDS(here::here("data", "processed", "clinical.rds"))
+```
+
+## cfRNA
+
+```{r}
+cfrna0 <- readRDS(here::here("data", "processed", "cfrna.rds"))
+cfrna_metadata <- cfrna0$clinical
+rownames(cfrna_metadata) <- cfrna_metadata$`Norgen ID`
+cfrna <- cfrna0$eset
+colnames(cfrna) <- cfrna_metadata$`Sample ID`
+rownames(cfrna) <- make.unique(rownames(cfrna))
+
+all(rownames(clinical) == colnames(cfrna))
+dim(clinical); dim(cfrna)
+hist(as.matrix(cfrna))
+```
+
+## normalize cfrna and plot again
+
+```{r}
+lib.size <- colSums(cfrna)
+y <- t(log2(t(cfrna + 0.5)/(lib.size + 1) * 1e+06))
+```
+
+```{r}
+cfrna <- t(y[apply(y, 1, sd) > 0, ]) # rm zero variable genes
+par(mfrow = c(1, 2))
+hist(y)
+hist(cfrna)
+```
+
+
+# PCA
+
+```{r}
+dim(cfrna)
+pcs <- prcomp(cfrna, scale. = TRUE, center = TRUE, rank. = 2)
+summary(pcs)
+```
+
+## correlate pcs with clinical variables
+
+```{r}
+pcaHeatmap(pcs$x, data.matrix(clinical))
+```
+
+
+## component plot
+
+```{r}
+p <- pcs$x %>% 
+  as.data.frame() %>% 
+  mutate(time = clinical$timepoint,
+         vaccination = clinical$Vaccination,
+         subj = clinical$studynumber,
+         Day = clinical$Day) %>% 
+  ggplot() +
+  geom_path(aes(x = PC1, y = PC2, group = subj), color = "gray",
+            arrow = arrow(length = unit(0.3, "cm"), type="closed")) +
+    geom_point(aes(x = PC1, y = PC2, 
+             group = subj, color = time)) +
+  facet_wrap(~vaccination, scales = "free") +
+  stat_ellipse(aes(x = PC1, y = PC2, group = time, color = time), level=0.8) +
+  theme_bw()
+ggsave(here::here("results", "eda", "pca_cfrna.png"), p, height = 3, width = 7)
+p
+```
+
+
+```{r}
+saveRDS(cfrna, here::here("results", "eda", "cfrna.rds"))
+
+```
+

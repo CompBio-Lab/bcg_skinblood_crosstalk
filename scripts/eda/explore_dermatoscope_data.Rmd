@@ -1,0 +1,92 @@
+---
+title: "explore dermatoscope images"
+author: "Amrit Singh"
+date: "June 30, 2025"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse);
+library(limma)
+library(ggimage)
+source(here::here("scripts", "eda", "eda_helperfunctions.R"))
+```
+
+# Import data
+
+```{r}
+## clinical
+clinical <- readRDS(here::here("data", "processed", "clinical.rds"))
+
+## dermatoscopic images
+images <- readRDS(here::here("data", "processed", "dermatoscopic_images.rds"))
+all(rownames(clinical) == rownames(images))
+```
+
+# PCA
+
+```{r}
+images <- images[, apply(images, 2, sd) > 0] # rm zero images genes
+pcs <- prcomp(images, scale. = TRUE, center = TRUE, rank. = 2)
+summary(pcs)
+```
+
+## correlate pcs with clinical variables
+
+```{r}
+pcaHeatmap(pcs$x, data.matrix(clinical))
+```
+
+## component plot
+
+```{r}
+pcs$x %>% 
+  as.data.frame() %>% 
+  mutate(time = clinical$timepoint,
+         vaccination = clinical$Vaccination,
+         subj = clinical$studynumber,
+         Day = clinical$Day) %>% 
+  ggplot() +
+  geom_path(aes(x = PC1, y = PC2, group = subj), color = "gray",
+            arrow = arrow(length = unit(0.3, "cm"), type="closed")) +
+    geom_point(aes(x = PC1, y = PC2, 
+             group = subj, color = time)) +
+  facet_wrap(~vaccination, scales = "free") +
+  stat_ellipse(aes(x = PC1, y = PC2, group = time, color = time), level=0.8) +
+  theme_bw()
+
+```
+
+## plot images
+
+```{r}
+clinical2 <- data.frame(samplenumber = sapply(strsplit(list.files(here::here("data", "raw", "images", "dermatoscope")), "_"), function(i) i[[2]]),
+           file = list.files(here::here("data", "raw", "images", "dermatoscope"), full.names = TRUE)) %>% 
+  inner_join(clinical, by="samplenumber")
+
+df <- pcs$x %>% 
+  as.data.frame() %>% 
+  mutate(samplenumber = rownames(.)) %>% 
+  left_join(clinical2, "samplenumber")
+df$size <- 0.1
+# df$size[df$type_day %in% "14"] <- 0.1
+p_superblock <- ggplot(df, aes(x = PC1, y = PC2)) +
+    geom_image(aes(image=file, size=I(size))) +
+  # geom_text_repel(aes(label=id, color = type_day), 
+  #                 box.padding = 0.1) +
+  theme_bw() +
+  # theme(legend.position = "none") +
+  ylab("Component 2") +
+  xlab("Component 1") +
+  stat_ellipse(aes(group=type_day)) +
+  facet_wrap(~type_day)
+p_superblock
+```
+
+## save datasets
+
+```{r}
+saveRDS(images, here::here("results", "eda", "dermatoscopic_images_filtered.rds"))
+```
+

@@ -1,0 +1,96 @@
+---
+title: "Differential expression analysis of dermatoscopic image features"
+author: "Amrit Singh"
+date: "June 30, 2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(limma)
+```
+
+# import datasets
+
+```{r}
+## clinical
+clinical <- readRDS(here::here("data", "processed", "clinical.rds"))
+
+## dermatoscopic images
+images <- readRDS(here::here("results", "eda", "dermatoscopic_images_filtered.rds"))
+
+all(rownames(clinical) == rownames(images))
+
+
+```
+
+## compute delta data
+
+```{r}
+clinical_baseline <- subset(clinical, visit == "BASELINE")
+clinical_baseline <- clinical_baseline[order(clinical_baseline$studynumber), ]
+clinical_followup <- subset(clinical, visit == "FOLLOW_UP")
+clinical_followup <- clinical_followup[order(clinical_followup$studynumber), ]
+all(clinical_baseline$studynumber == clinical_followup$studynumber)
+
+dermatoscopic_diff <- images[rownames(clinical_followup), ]-images[rownames(clinical_baseline), ]
+dermatoscopic_diff <- dermatoscopic_diff[order(rownames(dermatoscopic_diff)), ]
+clinical_diff <- clinical_followup
+clinical_diff <- clinical_diff[order(rownames(clinical_diff)), ]
+all(rownames(dermatoscopic_diff) == rownames(clinical_diff))
+```
+
+## pairwise comparisons
+
+```{r}
+group <-clinical_diff$type_day
+design <- model.matrix(~group+0)
+colnames(design) <- gsub("group", "", colnames(design))
+lmfit <- lmFit(t(dermatoscopic_diff), design)
+cont <- makeContrasts(BCG_1-Placebo, BCG_7-BCG_1, BCG_14-BCG_7, levels = design)
+lmfit.cont <- contrasts.fit(lmfit, cont)
+lmfit.cont.ebayes <- eBayes(lmfit.cont)
+top <- lapply(colnames(cont), function(contrast){
+  topTable(lmfit.cont.ebayes, coef = contrast,
+                adjust.method = "BH", n= nrow(lmfit.cont.ebayes)) %>% 
+    as.data.frame() %>% 
+    mutate(contrast = contrast) %>% 
+    mutate(feature = rownames(.)) %>% 
+    mutate(n = 1:n())
+}) %>% 
+  do.call(rbind, .)
+
+```
+
+## line plots for pairwise diffexp comparisons
+
+```{r}
+p <- ggplot(top, aes(x = n, y = adj.P.Val)) +
+  geom_line() +
+  facet_grid(~contrast, scales = "free") +
+  scale_x_log10() +
+  ylim(c(0,1)) +
+  geom_hline(yintercept = 0.1, col = 'grey')
+p
+```
+## save image features
+
+```{r}
+sig_image_features <- filter(top, adj.P.Val < 0.1)
+table(sig_image_features$contrast)
+
+saveRDS(images[rownames(clinical_baseline), ], 
+        here::here("results", "de", "dermatoscopic_baseline_all.rds"))
+saveRDS(images[rownames(clinical_followup),], 
+        here::here("results", "de", "dermatoscopic_followup_all.rds"))
+saveRDS(images[rownames(clinical_followup), sig_image_features$feature], 
+        here::here("results", "de", "dermatoscopic_followup_sig.rds"))
+saveRDS(dermatoscopic_diff[rownames(clinical_followup), sig_image_features$feature], 
+        here::here("results", "de", "dermatoscopic_diff_sig.rds"))
+saveRDS(dermatoscopic_diff[rownames(clinical_followup), ], 
+        here::here("results", "de", "dermatoscopic_diff.rds"))
+```
+
+

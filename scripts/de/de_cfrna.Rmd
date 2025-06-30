@@ -1,0 +1,465 @@
+---
+title: "Differential gene expression analysis of blood data"
+author: "Amrit Singh"
+date: "June 30, 2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse);
+library(limma)
+library(fgsea)
+library(GSVA)
+library(ComplexHeatmap)
+library(ggpubr)
+
+source(here::here("scripts", "de", "de_helperfunctions.R"))
+```
+
+# Import data
+
+## clinical
+
+```{r}
+clinical <- readRDS(here::here("data", "processed", "clinical.rds"))
+clinical_baseline <- subset(clinical, visit == "BASELINE")
+clinical_baseline <- clinical_baseline[order(clinical_baseline$studynumber), ]
+clinical_followup <- subset(clinical, visit == "FOLLOW_UP")
+clinical_followup <- clinical_followup[order(clinical_followup$studynumber), ]
+all(clinical_baseline$studynumber == clinical_followup$studynumber)
+saveRDS(clinical_followup, here::here("results", "de", "clinical_followup.rds"))
+
+
+cfrna <- readRDS(here::here("results", "eda", "cfrna.rds"))
+diff <- cfrna[rownames(clinical_followup), ]-cfrna[rownames(clinical_baseline), ]
+all(rownames(diff) == rownames(clinical_followup))
+group <- factor(clinical_followup$type_day, levels = c("Placebo", "BCG_1", "BCG_7", "BCG_14"))
+names(group) <- rownames(clinical_followup)
+all(rownames(diff) == names(group))
+
+```
+
+# Differential expression analysis
+
+```{r}
+fdr_cutoff <- 0.1
+design <- model.matrix(~group+0)
+colnames(design)[colnames(design) == "groupPlacebo"] <- "placebo"
+colnames(design)[colnames(design) == "groupBCG_1"] <- "BCG_Day1"
+colnames(design)[colnames(design) == "groupBCG_7"] <- "BCG_Day7"
+colnames(design)[colnames(design) == "groupBCG_14"] <- "BCG_Day14"
+cont <- makeContrasts(BCG_Day1-placebo, BCG_Day7-BCG_Day1, BCG_Day14-BCG_Day7, levels = design)
+lmfit <- lmFit(t(diff), design)
+fit2 <- contrasts.fit(lmfit, cont)
+fit2$t <- fit2$coef/fit2$stdev.unscaled/fit2$sigma
+fit2$p.value <- 2 * pt(-abs(fit2$t), df = fit2$df.residual)
+top <- lapply(colnames(cont), function(contrast){
+  topTable(fit2, coef = contrast, sort.by = "p",
+                adjust.method = "BH", n= nrow(fit2)) %>% 
+    as.data.frame() %>% 
+    mutate(contrast = contrast) %>% 
+    mutate(feature = rownames(.)) %>% 
+    mutate(n = 1:n())
+}) %>% 
+  do.call(rbind, .)
+top$contrast[top$contrast == "BCG_Day1 - placebo"] <- "Placebo vs. BCG-Day1"
+top$contrast[top$contrast == "BCG_Day7 - BCG_Day1"] <- "BCG-Day1 vs. BCG-Day7"
+top$contrast[top$contrast == "BCG_Day14 - BCG_Day7"] <- "BCG-Day7 vs. BCG-Day14"
+
+p <- top %>% 
+  mutate(contrast = factor(contrast, levels = c("Placebo vs. BCG-Day1",
+                                                "BCG-Day1 vs. BCG-Day7", "BCG-Day7 vs. BCG-Day14"))) %>% 
+  ggplot(aes(x = n, y = adj.P.Val)) +
+  geom_line() +
+  scale_x_log10() +
+  facet_wrap(~contrast) +
+  theme_bw() +
+  geom_hline(yintercept = fdr_cutoff, color = "gray", linetype = 2)
+saveRDS(top, here::here("results", "de", "de_cfrna_toptable.rds"))
+ggsave(here::here("results", "de", "de_cfrna.png"), p)
+p
+```
+
+
+```{r}
+top %>% 
+  filter(adj.P.Val < fdr_cutoff)
+```
+
+
+# Gene set enrichment analysis
+
+```{r}
+dbs <- readRDS(here::here("data", "annotations", "dbs.rds"))
+
+ranks <- lapply(unique(top$contrast), function(i){
+  x <- subset(top, contrast == i)
+  ranks <- x$t
+  names(ranks) <- x$feature
+  ranks
+})
+names(ranks) <- unique(top$contrast)
+
+set.seed(1234)
+result <- lapply(names(ranks), function(cts){
+  fgseaRes <- lapply(names(dbs), function(db){
+    pathways <- lapply(dbs[[db]]$data, function(i){as.character(unlist(i))})
+    names(pathways) <- dbs[[db]]$pathway
+    stats = ranks[[cts]]
+    fgsea_result <- fgsea(pathways = pathways, stats = ranks[[cts]],
+                          minSize  = 5, maxSize  = 500,
+                          nPermSimple=10000)
+    fgsea_result$DB <- db
+    fgsea_result
+  }) %>%
+    do.call(rbind, .)
+  fgseaRes$contrast <- cts
+  fgseaRes
+}) %>%
+  do.call(rbind, .) %>%
+  as.data.frame()
+
+my_colors <- c(
+    "#E81E89", 
+    "#7570b3",
+    "#0E85F2"
+)
+names(my_colors) <- levels(result$DB)
+
+
+result %>% 
+  group_by(contrast, DB) %>% 
+  filter(padj < 0.1) %>% 
+  summarise(n = n())
+
+result %>% 
+  mutate(FC = ifelse(NES > 0, "UP", "DOWN")) %>% 
+  group_by(contrast, DB, FC) %>% 
+  filter(padj < 0.1) %>% 
+  summarise(n = n())
+
+gset_fdr <- result %>% 
+  filter(DB != "reactome") %>% 
+  mutate(contrast = factor(contrast, levels = c("Placebo vs. BCG-Day1",
+                                                "BCG-Day1 vs. BCG-Day7", "BCG-Day7 vs. BCG-Day14"))) %>% 
+  group_by(DB, contrast) %>% 
+  arrange(padj) %>% 
+  mutate(n = 1:n()) %>% 
+  ggplot(aes(x = n, y = padj, color = DB)) +
+  geom_line(size=1) +
+  scale_x_log10() +
+  facet_wrap(~contrast) +
+  theme_classic() +
+  geom_hline(yintercept = 0.1, color = "gray", linetype = 2) +
+  xlab("Number of signficant genesets") +
+  ylab("BH-FDR") +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 15)) +
+  scale_color_manual(name = "Contrasts", values = my_colors)
+
+
+ggsave(here::here("results", "de", "cfrna_geneset_enrich_fdrs.png"), gset_fdr,
+       height=4, width=10)
+gset_fdr
+```
+
+```{r}
+pathway_analysis <- result %>% 
+  mutate(contrast = factor(contrast, levels = c("Placebo vs. BCG-Day1",
+                                                "BCG-Day1 vs. BCG-Day7", "BCG-Day7 vs. BCG-Day14"))) %>% 
+  mutate(logp = -log10(pval)) %>% 
+  filter(DB == "kegg")
+pathway_analysis %>% 
+  ggplot(aes(x = NES, y = logp)) +
+  geom_point() +
+  facet_wrap(~contrast, scales = "free") +
+  theme_classic() +
+  ggrepel::geom_text_repel(data=filter(pathway_analysis, padj < 0.1),
+                           aes(label = pathway))
+```
+
+
+#### heatmap of KEGG pathways
+
+```{r}
+db <- "kegg"
+seg <- "Full ROI"
+cutoff <- 0.1
+cts_tissue_ord <- c("Placebo vs. BCG-Day1", 
+                    "BCG-Day1 vs. BCG-Day7",
+                    "BCG-Day7 vs. BCG-Day14")
+ht_cols <- list(Comparison = c("Placebo vs. BCG-Day1"="#999999", 
+                               "BCG-Day1 vs. BCG-Day7"="#E69F00", 
+                               "BCG-Day7 vs. BCG-Day14" = "#56B4E9"))
+
+top_sig <- result %>%
+  filter(DB == db, padj < cutoff)
+
+ann <- dbs[[db]] %>%
+  dplyr::select(-data) %>%
+  as.data.frame()
+rownames(ann) <- ann$pathway
+
+nes0 <- result %>%
+  filter(DB == db, pathway %in% unique(top_sig$pathway)) %>%
+  dplyr::select(pathway, NES, contrast) %>%
+  spread(contrast, NES, fill = 0)
+nes = nes0[, cts_tissue_ord]
+rownames(nes) <- nes0$pathway
+padj0 <- result %>%
+  filter(DB == db, pathway %in% unique(top_sig$pathway)) %>%
+  dplyr::select(pathway, padj, contrast) %>%
+  spread(contrast, padj, fill = 1)
+padj = padj0[, cts_tissue_ord]
+rownames(padj) <- padj0$pathway
+all(colnames(nes) == colnames(padj))
+col_ha <- columnAnnotation(Comparison = factor(cts_tissue_ord, levels = cts_tissue_ord),
+                           col = ht_cols)
+colnames(nes) <- NULL
+
+level2_colors <- readRDS(here::here("results", "de", "kegg_colors.rds"))
+row_ha <- rowAnnotation(level = ann[rownames(nes), "level2"],
+                        col = list(level = level2_colors))
+
+htmp <- Heatmap(nes, name = "NES",
+                top_annotation = col_ha,
+                right_annotation = row_ha,
+                border = TRUE,
+                row_split = ann[rownames(nes),"level1"],
+                row_title_rot = 0,
+                cluster_columns = FALSE,
+                width = ncol(nes)*unit(8, "mm"),
+                heatmap_legend_param = list(
+                  legend_direction = "horizontal",
+                  legend_width = unit(2, "cm")),
+                cell_fun = function(j, i, x, y, width, height, fill) {
+                  if(padj[i, j] < cutoff)
+                    grid.text("*", x, y, gp = gpar(fontsize = 15))
+                })
+png(file=here::here("results", "de", "cfrna_heatmap_kegg.png"),
+    height = 7, width = 15, units = "in", res = 200)
+draw(htmp, heatmap_legend_side="bottom",
+     annotation_legend_side="left",
+     legend_grouping = "original")
+dev.off()
+```
+## word of genes in top pathways
+
+```{r}
+# siggenes <- top %>% 
+#   filter(adj.P.Val < 0.2)
+# 
+# a <- lapply(sig_cells$leadingEdge, function(i) intersect(i, rownames(siggenes)))
+a = top_sig$leadingEdge
+df = data.frame(pathway = rep(top_sig$pathway, sapply(a, length)),
+           genes = unlist(a)) %>% 
+  count(genes, sort=TRUE)
+
+library(wordcloud)
+
+set.seed(1234) # for reproducibility 
+wordcloud(words = df$genes, freq = df$n, min.freq = 2, max.words=100, random.order=FALSE, rot.per=0,
+          colors=brewer.pal(9,"BuGn"))
+
+
+  
+```
+
+```{r}
+df <- diff[, df$genes[df$n > 6]] %>% 
+    as.data.frame() %>% 
+  mutate(type_day = clinical_followup$type_day) %>% 
+  gather(gene, exp, -type_day)
+df$gene <- paste0("cf-", df$gene)
+df$type_day <- factor(df$type_day, c("Placebo", "BCG_1", "BCG_7", "BCG_14"))
+p = ggboxplot(df, x = "type_day", y = "exp", color = "gene",
+              add = "jitter")
+p2 <- facet(p, facet.by = "gene", ncol = 8) +
+    stat_compare_means(
+    comparisons = list(c("Placebo", "BCG_1"), c("BCG_1", "BCG_7"), c("BCG_7", "BCG_14")),
+    method = "t.test"
+  ) + 
+  ylim(c(-4, 6)) +
+  geom_hline(yintercept = 0, linetype="dashed") +
+  theme(legend.position = "none",
+        strip.text = element_text(size = 15, face="italic"),
+        axis.text.x = element_text(angle = 45,
+                                   hjust = 1, vjust = 1,
+                                   size = 10, color = "black")) +
+  ylab("Expression relative to \n baseline (Post-Pre)") +
+  xlab("Group") 
+p2
+```
+
+```{r}
+chemokinepathway <- result %>% 
+  filter(pathway == "T cell receptor signaling pathway",
+         contrast == "BCG-Day7 vs. BCG-Day14") %>% 
+  pull(leadingEdge)
+
+chemokinepathway_sig <- top %>% 
+  filter(feature %in% chemokinepathway[[1]],
+         contrast == "BCG-Day7 vs. BCG-Day14",
+         P.Value <  0.05) %>% 
+  arrange(logFC)
+
+p <- top %>% 
+  filter(feature %in% unique(chemokinepathway_sig$feature)) %>% 
+  mutate(feature = factor(feature, levels = chemokinepathway_sig$feature)) %>% 
+  ggplot(aes(y = feature, x = logFC, fill = contrast)) +
+  geom_bar(stat = "identity") +
+  theme_classic() +
+  ylab("cell-free RNA transcripts") +
+  scale_x_continuous(expression("log"[2]~"Fold-change")) +
+  scale_fill_manual(values = c("Placebo vs. BCG-Day1"="#999999", 
+                               "BCG-Day1 vs. BCG-Day7"="#E69F00", 
+                               "BCG-Day7 vs. BCG-Day14" = "#56B4E9")) +
+  theme(legend.position = "none") +
+  theme(axis.text.y = element_text(face = "italic")) +
+    theme( # remove the vertical grid lines
+           panel.grid.major.x = element_blank() ,
+           # explicitly set the horizontal lines (or they will disappear too)
+           panel.grid.major.y = element_line( size=.1, color="black" ) 
+    )
+ggsave(here::here("results", "de", "cfrna_chemokinepathway.png"), p,
+       height=4, width = 3)
+
+p
+```
+
+
+### Heatmap of cells
+
+```{r}
+db <- "panglaodb"
+seg <- "Full ROI"
+cutoff <- 0.1
+cts_tissue_ord <- c("Placebo vs. BCG-Day1", 
+                    "BCG-Day1 vs. BCG-Day7",
+                    "BCG-Day7 vs. BCG-Day14")
+ht_cols <- list(Comparison = c("Placebo vs. BCG-Day1"="#999999", 
+                               "BCG-Day1 vs. BCG-Day7"="#E69F00", 
+                               "BCG-Day7 vs. BCG-Day14" = "#56B4E9"))
+
+top_sig <- result %>%
+  filter(DB == db, padj < cutoff)
+
+ann <- dbs[[db]] %>%
+  dplyr::select(-data) %>%
+  as.data.frame()
+rownames(ann) <- ann$pathway
+
+nes0 <- result %>%
+  filter(DB == db, pathway %in% unique(top_sig$pathway)) %>%
+  dplyr::select(pathway, NES, contrast) %>%
+  spread(contrast, NES, fill = 0)
+nes = nes0[, cts_tissue_ord]
+rownames(nes) <- nes0$pathway
+padj0 <- result %>%
+  filter(DB == db, pathway %in% unique(top_sig$pathway)) %>%
+  dplyr::select(pathway, padj, contrast) %>%
+  spread(contrast, padj, fill = 1)
+padj = padj0[, cts_tissue_ord]
+rownames(padj) <- padj0$pathway
+all(colnames(nes) == colnames(padj))
+col_ha <- columnAnnotation(Comparison = factor(cts_tissue_ord, levels = cts_tissue_ord),
+                           col = ht_cols)
+colnames(nes) <- NULL
+
+htmp <- Heatmap(nes, name = "NES",
+                top_annotation = col_ha,
+                border = TRUE,
+                row_split = ann[rownames(nes),"organ"],
+                row_title_rot = 0,
+                cluster_columns = FALSE,
+                width = ncol(nes)*unit(8, "mm"),
+                heatmap_legend_param = list(
+                  legend_direction = "horizontal",
+                  legend_width = unit(2, "cm")),
+                cell_fun = function(j, i, x, y, width, height, fill) {
+                  if(padj[i, j] < cutoff)
+                    grid.text("*", x, y, gp = gpar(fontsize = 15))
+                })
+png(file=here::here("results", "de", "cfrna_heatmap_vaccine_cells.png"),
+    height = 3, width = 7, units = "in", res = 200)
+draw(htmp, heatmap_legend_side="bottom",
+     annotation_legend_side="left",
+     legend_grouping = "original")
+dev.off()
+
+
+```
+
+
+```{r}
+chemokinepathway <- result %>% 
+  filter(pathway == "Gamma delta T cells",
+         contrast == "BCG-Day7 vs. BCG-Day14") %>% 
+  pull(leadingEdge)
+
+chemokinepathway_sig <- top %>% 
+  filter(feature %in% chemokinepathway[[1]],
+         P.Value < 0.05,
+         contrast == "BCG-Day7 vs. BCG-Day14") %>% 
+  arrange(logFC)
+
+df <- diff[, chemokinepathway_sig$feature] %>% 
+    as.data.frame() %>% 
+  mutate(type_day = clinical_followup$type_day) %>% 
+  gather(gene, exp, -type_day)
+df$gene <- paste0("cf-", df$gene)
+df$type_day <- factor(df$type_day, c("Placebo", "BCG_1", "BCG_7", "BCG_14"))
+p = ggboxplot(df, x = "type_day", y = "exp", color = "gene",
+              add = "jitter")
+p2 <- facet(p, facet.by = "gene", ncol = 8) +
+    stat_compare_means(
+    comparisons = list(c("Placebo", "BCG_1"), c("BCG_1", "BCG_7"), c("BCG_7", "BCG_14")),
+    method = "t.test"
+  ) + 
+  ylim(c(-2.5, 3)) +
+  geom_hline(yintercept = 0, linetype="dashed") +
+  theme(legend.position = "none",
+        strip.text = element_text(size = 15, face="italic"),
+        axis.text.x = element_text(angle = 45,
+                                   hjust = 1, vjust = 1,
+                                   size = 10, color = "black")) +
+  ylab("Expression relative to \n baseline") +
+  xlab("Group") 
+ggsave(here::here("results", "de", "de_cfrna_gammadelta.png"), p2,
+       height=2.5, width=5)
+p2
+```
+
+# save data
+
+```{r}
+blood_cells <- lapply(dbs$panglaodb$data, function(i){ as.character(unlist(i))})
+names(blood_cells) <- dbs$panglaodb$pathway
+blood_cells <- blood_cells[dbs$panglaodb$organ %in% c("Immune system", "Blood")]
+ccPar <- gsvaParam(t(cfrna), blood_cells)
+cc.es <- t(gsva(ccPar, verbose=FALSE))
+
+saveRDS(cc.es, here::here("results", "de", "cfrna_cc.rds"))
+## baseline
+baseline_cc <- cc.es[rownames(clinical_baseline), ]
+rownames(baseline_cc) <- rownames(clinical_followup)
+baseline_cc <- baseline_cc[order(rownames(baseline_cc)), ]
+baseline_cc <- baseline_cc[, apply(baseline_cc, 2, sd) > 0]
+saveRDS(baseline_cc, here::here("results", "de", "cfrna_cc_baseline.rds"))
+
+
+## followup
+sig_cells <- result %>% 
+  filter(DB == "panglaodb", padj < 0.1) %>% 
+  pull(pathway)
+cfrna_cc_followup_sig <- cc.es[rownames(clinical_followup), sig_cells]
+cfrna_cc_followup_sig <- cfrna_cc_followup_sig[order(rownames(cfrna_cc_followup_sig)), ]
+saveRDS(cfrna_cc_followup_sig, here::here("results", "de", "cfrna_cc_followup_sig.rds"))
+cfrna_cc_followup_all <- cc.es[rownames(clinical_followup), ]
+cfrna_cc_followup_all <- cfrna_cc_followup_all[order(rownames(cfrna_cc_followup_all)), ]
+saveRDS(cfrna_cc_followup_all, here::here("results", "de", "cfrna_cc_followup_all.rds"))
+
+```
+

@@ -1,0 +1,108 @@
+---
+title: "delta skin image features ~ baseline cfRNA"
+author: "Amrit Singh"
+date: "June 30, 2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(mixOmics)
+library(RGCCA)
+library(ggrepel)
+library(tidyverse)
+library(ggimage)
+source(here::here("scripts", "eda", "eda_helperfunctions.R"))
+```
+
+## import data
+
+```{r}
+clinical <- readRDS(here::here("results", "de", "clinical_followup.rds"))
+skin_derm_delta <- readRDS(here::here("results", "de", "dermatoscopic_diff.rds"))[rownames(clinical), ]
+blood_cells_baseline <- readRDS(here::here("results", "de", "cfrna_cc_baseline.rds"))[rownames(clinical), ]
+all(rownames(clinical) == rownames(skin_derm_delta))
+all(rownames(clinical) == rownames(blood_cells_baseline))
+
+res <- spls(blood_cells_baseline[clinical$type_day != "Placebo", ], skin_derm_delta[clinical$type_day != "Placebo", ],
+            keepX = c(5, 5), keepY = c(5, 5), mode = "regression")
+plotIndiv(res, group = clinical$type_day[clinical$type_day != "Placebo"], legend = TRUE, ellipse = TRUE)
+b<-plotVar(res)
+
+
+```
+
+
+```{r}
+
+clinical2 <- data.frame(samplenumber = sapply(strsplit(list.files(here::here("data", "raw", "images", "dermatoscope")), "_"), function(i) i[[2]]),
+           file = list.files(here::here("data", "raw", "images", "dermatoscope"), full.names = TRUE)) %>% 
+  inner_join(clinical, by="samplenumber")
+
+a=(res$variates$X+res$variates$Y)/2
+df <- a %>% 
+  as.data.frame() %>% 
+  mutate(samplenumber = rownames(.)) %>% 
+  left_join(clinical2, "samplenumber")
+df$size <- 0.1
+df$type_day[df$type_day == "BCG_1"] <- "Day 1"
+df$type_day[df$type_day == "BCG_7"] <- "Day 7"
+df$type_day[df$type_day == "BCG_14"] <- "Day 14"
+df$type_day <- factor(df$type_day, c("Day 1",
+                                     "Day 7",
+                                     "Day 14"))
+# df$size[df$type_day %in% "14"] <- 0.1
+p_superblock <- ggplot(df, aes(x = comp1, y = comp2, 
+                               group=type_day)) +
+    geom_point(aes(col = type_day), size = 15, shape = 15) +
+  stat_centseg(alpha=0.7, aes(color = type_day)) + 
+  geom_hline(yintercept = 0, linetype="dashed") +
+  geom_vline(xintercept = 0, linetype="dashed") +
+  geom_image(aes(image=file, size=I(size))) +
+  # geom_text_repel(aes(label=samplenumber, color = type_day), 
+                   # box.padding = 0.1) +
+  theme_bw() +
+  # theme(legend.position = "none") +
+  ylab("Component 2") +
+  xlab("Component 1") +
+  scale_color_discrete(name = "Time post-BCG \n vaccination")
+p_superblock
+
+
+```
+```{r}
+c=cbind(b$x, b$y)
+rownames(c) <- b$names
+colnames(c) <- c("comp1", "comp2")
+
+df <- c %>% 
+  as.data.frame() %>% 
+  mutate(feat = rownames(.))
+df$selected <- "other"
+df$selected[df$feat %in% c("B cells", "B cells memory", "B cells naive", "Nuocytes", "Platelets")] <- "focus"
+p_corcir <- ggplot(df, aes(x = comp1, y = comp2, color = selected)) +
+  # geom_point() +
+  theme_bw()  +
+  ggforce::geom_circle(aes(x0 = 0, y0 = 0, r = 0.5), color = "grey") +
+  ggforce::geom_circle(aes(x0 = 0, y0 = 0, r = 1), color = "grey") +
+  geom_segment(aes(x = 0, y = 0, xend = comp1, yend = comp2,
+                   color = selected),
+                  arrow = arrow(length = unit(0.2, "cm")), alpha=0.5) +
+ ggrepel::geom_text_repel(aes(label = feat)) +
+  ylim(c(-1, 1)) +
+  xlim(c(-1, 1)) +
+  theme(legend.position = "bottom") +
+  scale_color_manual(name = "Region", values = c("blue", "darkgrey")) +
+  xlab("Component 1") +
+  ylab("Component 2") +
+  theme(legend.position = "none")
+
+p_comp_cir <- cowplot::plot_grid(p_superblock, p_corcir)
+p_corcir
+```
+
+```{r}
+ggsave(here::here("results", "integration", "baseline_blood_cells_derm.png"), p_comp_cir, height=4.5, width=11)
+```
+

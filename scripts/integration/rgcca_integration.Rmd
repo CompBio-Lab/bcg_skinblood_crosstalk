@@ -1,0 +1,607 @@
+---
+title: "multimodal data integration"
+author: "Amrit Singh"
+date: "June 30, 2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(RGCCA)
+library(tidyverse)
+library(ggimage)
+library(ggrepel)
+library(mixOmics)
+library(ggpubr)
+library(tidygraph)
+library(igraph)
+library(ggraph)
+library(ggrepel)
+library(ggforce)
+library(ggplot2)
+library(dplyr)
+library(scales)
+```
+
+## import data
+
+```{r}
+clinical <- readRDS(here::here("data", "processed", "clinical.rds"))
+datasets <- list("skin surface" = readRDS(here::here("results", "de", "dermatoscopic_followup_sig.rds")),
+                 "E genes" = readRDS(here::here("results", "de", "epi_geomx_eset_sig.rds")),
+                 "DH genes" = readRDS(here::here("results", "de", "derm_hypoderm_geomx_eset_sig.rds")),
+                 "E cells" = readRDS(here::here("results", "de", "epi_geomx_cc_sig.rds")),
+                 "DH cells" = readRDS(here::here("results", "de", "derm_hypoderm_geomx_cc_sig.rds")),
+                 "Blood cells" = readRDS(here::here("results", "de", "cfrna_cc_followup_all.rds")))
+comsubj <- intersect(rownames(clinical), Reduce(intersect, lapply(datasets, rownames)))
+clin <- clinical[comsubj, ]
+type_day <- clin$type_day
+blocks <- lapply(datasets, function(i){ i[comsubj, ]})
+```
+
+## Multimodal data integration
+
+### fit RGCCA model
+
+```{r}
+connection = matrix(0, ncol = length(blocks), nrow = length(blocks))
+rownames(connection) <- colnames(connection) <- names(blocks)
+connection["skin surface", c("E genes", "DH genes", "E cells", "DH cells", "Blood cells")] <- 1
+connection[c("E genes", "DH genes", "E cells", "DH cells", "Blood cells"), "skin surface"] <- 1
+connection["Blood cells", c("E genes", "DH genes", "E cells", "DH cells", "skin surface")] <- 1
+connection[c("E genes", "DH genes", "E cells", "DH cells", "skin surface"), "Blood cells"] <- 1
+
+fit_rgcca <- rgcca(blocks,
+  method = "rgcca",
+  connection = connection,
+  scale = TRUE,
+  superblock = TRUE,
+  tau = rep("optimal", length(blocks)),
+  ncomp = rep(2, length(blocks)),
+  scheme = "factorial",
+  comp_orth = TRUE,
+  verbose = TRUE)
+```
+
+### variation explained
+
+```{r}
+varexp <- plot(fit_rgcca, type = "ave", block = 1:length(blocks))
+ggsave(here::here("results", "integration", "rgcca_var_explained.pdf"), 
+       varexp, width = 6, height = 4)
+```
+
+## component plot
+
+```{r}
+clinical <- readRDS(here::here("data", "processed", "clinical.rds"))
+images <- grep(".png", list.files(here::here("data", "raw", "images", "dermatoscope"), full.names = TRUE), value = TRUE)
+v2 <- subset(clinical, visit == "FOLLOW_UP")
+clinical$image <- paste0(here::here("data/raw/images/dermatoscope/"), "V2_", rownames(v2), "_Before_Close.png")
+clinical$id <- rownames(clinical)
+d_geomx_images <- clinical %>% 
+  dplyr::select(id, image)
+
+## Dermatoscopic images
+df <- fit_rgcca$Y$superblock %>% 
+  as.data.frame() %>% 
+  mutate(type_day = factor(type_day, levels = c("Placebo", "BCG_1", "BCG_7", "BCG_14")),
+         id = rownames(.)) %>% 
+  left_join(d_geomx_images, "id")
+df$size <- 0.1
+df$size[df$type_day %in% c("Placebo", "BCG_Day14")] <- 0.1
+p1 <- ggplot(df, aes(x = comp1, y = comp2)) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  geom_image(aes(image=image, size=I(size)), position = position_jitter(width = 0)) +
+  geom_text_repel(aes(label=id, color = type_day), box.padding = 1) +
+  theme_bw() +
+  theme(legend.position = "right") +
+  xlab("Component 1") +
+  ylab("Component 2")
+ggsave(here::here("results", "integration", "comp_plot.pdf"), p1, width = 7, height = 5)
+p1
+```
+
+## Correlation circle
+```{r}
+a=mapply(function(weights, data){
+  data[, unique(unlist(apply(weights, 2, function(i){
+    unique(names(i[order(abs(i), decreasing = TRUE)][1:5]))
+  }, simplify = FALSE)))]
+}, weights = fit_rgcca$a[names(blocks)], data = fit_rgcca$blocks[names(blocks)],
+SIMPLIFY = FALSE) %>% 
+  do.call(cbind, .)
+
+var_names <- colnames(a)
+organ <- sapply(strsplit(colnames(a), "_"), function(i){ i[[1]]})
+organ[grep("Blood", organ)] <- "Blood"
+organ[grep("E ", organ)] <- "Epidermis"
+organ[grep("DH ", organ)] <- "Dermis+Hypodermis"
+organ[grep("D images", organ)] <- "Surface"
+modality <- sapply(strsplit(colnames(a), "_"), function(i){ i[[2]]})
+var_names <- sapply(strsplit(var_names, "_"), function(i){ i[[length(i)]]})
+
+cordat <- cor(a, fit_rgcca$Y$superblock)
+p2 <- cordat %>% 
+  as.data.frame() %>% 
+  mutate(feat = trimws(var_names), 
+         organ = organ, modality = modality) %>%
+  # filter(!(feat %in% grep("^X", feat, value = TRUE))) %>%
+  mutate(organ_modality = paste(organ, modality, sep="_")) %>% 
+  ggplot(aes(x = comp1, y = comp2, color = organ)) +
+  theme_bw()  +
+  ggforce::geom_circle(aes(x0 = 0, y0 = 0, r = 1), color = "grey") +
+  geom_segment(aes(x = 0, y = 0, xend = comp1, yend = comp2),
+                  arrow = arrow(length = unit(0.2, "cm")), alpha=0.5) +
+  annotate("rect", xmin = -1.1, xmax = -0.7, ymin = -0.3, ymax = 0.3,
+           alpha = .1, fill = NA, color="grey") +
+  annotate("rect", xmin = -0.3, xmax = 0.3, ymin = 0.65, ymax = 1.1,
+           alpha = .1,fill = NA, color="grey") +
+  annotate("rect", xmin = 0.7, xmax = 1.1, ymin = -0.3, ymax = 0.35,
+           alpha = .1,fill = NA, color="grey") +
+  annotate("rect", xmin = -0.3, xmax = 0.3, ymin = -1.1, ymax = -0.7,
+           alpha = .1,fill = NA, color="grey") +
+ ggrepel::geom_text_repel(aes(label = feat), size=3, max.overlaps = 100) +
+  ylim(c(-1.2, 1.2)) +
+  xlim(c(-1.2, 1.2)) +
+  theme(legend.position = "bottom") +
+  scale_color_manual(name = "Region", values = c("#388ECC","#F68B33", 
+                                                 "#009E73", "#CC79A7")) +
+  xlab("Component 1") +
+  ylab("Component 2")
+
+ggsave(here::here("results", "integration", "corCircle.pdf"), p2, width = 7, height = 7)
+p2
+```
+
+## features positively correlated with comp1
+
+```{r}
+comp1_pos <- list("DH cells" = c("Dendritic cells"),
+                  "E cells" = c("Gamma delta T cells"),
+                  "E genes" = "C1QB",
+                  "DH genes" = "CERS2")
+
+dfc <- lapply(names(comp1_pos), function(i){
+  blocks[[i]][, comp1_pos[[i]], drop = FALSE] %>% 
+    as.data.frame() %>% 
+    mutate(type_day = type_day) %>% 
+    gather(feature, value, -type_day) %>% 
+    mutate(type = i)
+}) %>% 
+  do.call(rbind, .)
+dfc$type[dfc$type == "Blood cells"] <- "Blood"
+dfc$type[dfc$type == "E genes"] <- "Epidermis"
+dfc$type[dfc$type == "E cells"] <- "Epidermis"
+dfc$type[dfc$type == "DH cells"] <- "Dermis+Hypodermis"
+dfc$type[dfc$type == "DH genes"] <- "Dermis+Hypodermis"
+dfc$type <- factor(dfc$type, c("Blood", "Dermis+Hypodermis", "Epidermis", "skin surface"))
+dfc$type_day <- gsub("BCG_", "Day", dfc$type_day)
+type_colors <- c("Blood"="#388ECC", "Dermis+Hypodermis"="#F68B33", 
+                 "Epidermis"="#009E73", "skin surface"="#CC79A7")
+
+p <- dfc %>% 
+  mutate(type_day = factor(type_day, c("Placebo", "Day1", "Day7", "Day14"))) %>%
+  group_by(feature) %>% 
+  # mutate(value = scale(value)) %>% 
+  mutate(label = feature) %>%
+  ggplot(aes(y = value, x = type_day, color = type)) +
+  geom_boxplot(aes(fill = type), alpha=0.5) +
+  scale_fill_manual(name = "Region", values = type_colors) +
+  scale_color_manual(name = "Region", values = type_colors) +
+  geom_point() +
+  theme_classic() +
+  theme(legend.position = "top",
+        strip.text = element_text(size = 15)) +
+  ylab("abundance") +
+  facet_wrap(~label, scales = "free", ncol = 2) +
+  stat_compare_means(
+    comparisons = list(c("Placebo", "Day1"), c("Placebo", "Day7"), c("Placebo", "Day14")),
+    method = "t.test"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  xlab("Group")
+ggsave(here::here("results", "integration", "comp1_pos_features.pdf"), 
+       p, width = 5, height = 5)
+
+```
+
+## features negatively correlated with comp1
+
+```{r}
+comp1_neg <- list("DH genes"  = c("SRPK3", "MRGPRX1"),
+                  "E genes" = c("CLDN18", "RTP3"))
+
+dfc <- lapply(names(comp1_neg), function(i){
+  blocks[[i]][, comp1_neg[[i]], drop = FALSE] %>% 
+    as.data.frame() %>% 
+    mutate(type_day = type_day) %>% 
+    gather(feature, value, -type_day) %>% 
+    mutate(type = i)
+}) %>% 
+  do.call(rbind, .)
+dfc$type[dfc$type == "Blood cells"] <- "Blood"
+dfc$type[dfc$type == "E genes"] <- "Epidermis"
+dfc$type[dfc$type == "E cells"] <- "Epidermis"
+dfc$type[dfc$type == "DH cells"] <- "Dermis+Hypodermis"
+dfc$type[dfc$type == "DH genes"] <- "Dermis+Hypodermis"
+dfc$type <- factor(dfc$type, c("Blood", "Dermis+Hypodermis", "Epidermis", "skin surface"))
+dfc$type_day <- gsub("BCG_", "Day", dfc$type_day)
+
+p <- dfc %>% 
+  mutate(type_day = factor(type_day, c("Placebo", "Day1", "Day7", "Day14"))) %>%
+  group_by(feature) %>% 
+  mutate(label = feature) %>%
+  ggplot(aes(y = value, x = type_day, color = type)) +
+  geom_boxplot(aes(fill = type), alpha=0.5) +
+  scale_fill_manual(name = "Region", values = type_colors) +
+  scale_color_manual(name = "Region", values = type_colors) +
+  geom_point() +
+  theme_classic() +
+  theme(legend.position = "top",
+        strip.text = element_text(size = 15)) +
+  ylab("abundance") +
+  xlab("Group") +
+  facet_wrap(~label, scales = "free", ncol = 2) +
+  stat_compare_means(
+    comparisons = list(c("Placebo", "Day1"), c("Placebo", "Day7"), c("Placebo", "Day14")),
+    method = "t.test"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+ggsave(here::here("results", "integration", "comp1_neg_features.pdf"), 
+       p, width = 5, height = 5)
+
+```
+
+## features positively correlated with comp2
+
+```{r}
+comp2_pos <- list("DH genes"  = c("PAPLN", "SELENOP"),
+                  "Blood cells" = c("Platelets", "Gamma delta T cells"))
+
+dfc <- lapply(names(comp2_pos), function(i){
+  blocks[[i]][, comp2_pos[[i]], drop = FALSE] %>% 
+    as.data.frame() %>% 
+    mutate(type_day = type_day) %>% 
+    gather(feature, value, -type_day) %>% 
+    mutate(type = i)
+}) %>% 
+  do.call(rbind, .)
+dfc$type[dfc$type == "Blood cells"] <- "Blood"
+dfc$type[dfc$type == "E genes"] <- "Epidermis"
+dfc$type[dfc$type == "E cells"] <- "Epidermis"
+dfc$type[dfc$type == "DH cells"] <- "Dermis+Hypodermis"
+dfc$type[dfc$type == "DH genes"] <- "Dermis+Hypodermis"
+dfc$type <- factor(dfc$type, c("Blood", "Dermis+Hypodermis", "Epidermis", "skin surface"))
+dfc$type_day <- gsub("BCG_", "Day", dfc$type_day)
+
+p <- dfc %>% 
+  mutate(type_day = factor(type_day, c("Placebo", "Day1", "Day7", "Day14"))) %>%
+  group_by(feature) %>% 
+  mutate(label = feature) %>%
+  ggplot(aes(y = value, x = type_day, color = type)) +
+  geom_boxplot(aes(fill = type), alpha=0.5) +
+  scale_fill_manual(name = "Region", values = type_colors) +
+  scale_color_manual(name = "Region", values = type_colors) +
+  geom_point() +
+  theme_classic() +
+  theme(legend.position = "right",
+        strip.text = element_text(size = 15)) +
+  ylab("abundance") +
+  xlab("Group") +
+  facet_wrap(~label, scales = "free", nrow = 1) +
+  stat_compare_means(
+    comparisons = list(c("Placebo", "Day14"), c("Day1", "Day14"), 
+                       c("Day7", "Day14")),
+    method = "t.test"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+ggsave(here::here("results", "integration", "comp2_pos_features.pdf"), 
+       p, width = 12, height = 2.5)
+
+```
+
+## features negatively correlated with comp2
+
+```{r}
+comp2_neg <- list("DH genes"  = c("OR4F4"),
+                  "E genes" = c("HS3ST3B1", "TNFRSF10C", "PDE4D"))
+
+dfc <- lapply(names(comp2_neg), function(i){
+  blocks[[i]][, comp2_neg[[i]], drop = FALSE] %>% 
+    as.data.frame() %>% 
+    mutate(type_day = type_day) %>% 
+    gather(feature, value, -type_day) %>% 
+    mutate(type = i)
+}) %>% 
+  do.call(rbind, .)
+dfc$type[dfc$type == "Blood cells"] <- "Blood"
+dfc$type[dfc$type == "E genes"] <- "Epidermis"
+dfc$type[dfc$type == "E cells"] <- "Epidermis"
+dfc$type[dfc$type == "DH cells"] <- "Dermis+Hypodermis"
+dfc$type[dfc$type == "DH genes"] <- "Dermis+Hypodermis"
+dfc$type <- factor(dfc$type, c("Blood", "Dermis+Hypodermis", "Epidermis", "skin surface"))
+dfc$type_day <- gsub("BCG_", "Day", dfc$type_day)
+
+
+p <- dfc %>% 
+  mutate(type_day = factor(type_day, c("Placebo", "Day1", "Day7", "Day14"))) %>%
+  group_by(feature) %>% 
+  mutate(label = feature) %>%
+  ggplot(aes(y = value, x = type_day, color = type)) +
+  geom_boxplot(aes(fill = type), alpha=0.5) +
+  scale_fill_manual(name = "Region", values = type_colors) +
+  scale_color_manual(name = "Region", values = type_colors) +
+  geom_point() +
+  theme_classic() +
+  theme(legend.position = "right",
+        strip.text = element_text(size = 15)) +
+  ylab("abundance") +
+  xlab("Group") +
+  facet_wrap(~label, scales = "free", nrow = 1) +
+  stat_compare_means(
+    comparisons = list(c("Placebo", "Day14"), c("Day1", "Day14"), 
+                       c("Day7", "Day14")),
+    method = "t.test"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+ggsave(here::here("results", "integration", "comp2_neg_features.pdf"), 
+       p, width = 12, height = 2.5)
+
+```
+
+```{r}
+cor_matrix <- cor(a)
+dist_matrix <- as.dist(1 - abs(cor_matrix))
+hc <- hclust(dist_matrix, method = "average")
+clusters <- cutree(hc, k = 3)
+
+```
+
+## component 1
+
+```{r}
+cor_matrix <- cor(a)
+cor_matrix <- cor_matrix[clusters==1, clusters==1]
+diag(cor_matrix) <- 0
+cor_matrix[lower.tri(cor_matrix)] <- 0
+df <- as.data.frame(as.table(cor_matrix))
+colnames(df) <- c("from", "to", "weight")
+links <- df
+links <- links[abs(links$weight) > 0.5, ]
+edges=links
+
+layer_index <- c(1, 2, 2, 3, 3, 4)
+names(layer_index) <- c("skin surface", "E cells", "E genes",
+                        "DH cells", "DH genes", "Blood cells")
+node_names <- as.character(unique(c(edges$from, edges$to)))
+nodes <- data.frame(
+  name = node_names,
+  layer_name = sapply(strsplit(node_names, "_"), function(i) i[[1]]),
+  layer = layer_index[sapply(strsplit(node_names, "_"), function(i) i[[1]])],
+  label = sapply(strsplit(node_names, "_"), function(i) i[[2]])
+)
+
+set.seed(33)
+# 3. Build graph and assign clusters
+graph <- tbl_graph(nodes = nodes, edges = edges, directed = FALSE) %>%
+  mutate(cluster = group_louvain(resolution = 0.1))
+
+# 4. Extract node info, include cluster and layer info
+node_data <- graph %>%
+  as_tibble() %>%
+  mutate(name = V(graph)$name) %>%
+  left_join(nodes[, c("name", "layer")], by = c("name", "layer")) %>%
+  group_by(layer) %>%
+  mutate(
+    n_clusters = n_distinct(cluster),
+    cluster_id = as.numeric(as.factor(cluster))
+  ) %>%
+  group_by(layer, cluster) %>%
+  mutate(
+    cluster_size = n(),
+    node_rank = row_number()
+  ) %>%
+  ungroup() %>%
+  # Assign horizontal position:
+  mutate(
+    # total width allocated per layer:
+    layer_width = 7,
+    # width per cluster (leave small gap between clusters)
+    cluster_width = layer_width / n_clusters,
+    # start position of cluster block within layer's horizontal space
+    cluster_start = (cluster_id - 1) * cluster_width,
+    # spread nodes evenly within cluster block from cluster_start to cluster_start + cluster_width
+    x = cluster_start + (node_rank - 0.5) * (cluster_width / cluster_size),
+    y = -layer,
+    x_jitter = x + runif(n(), -0.4, 0.4),
+    y_jitter = y + runif(n(), -0.4, 0.4)
+  )
+node_data$layer_name[node_data$layer_name %in% c("E cells", "E genes")] <- "Epidermis"
+node_data$layer_name[node_data$layer_name %in% c("DH cells", "DH genes")] <- "Dermis \n hypodermis"
+node_data$layer_name[node_data$layer_name %in% c("Blood cells")] <- "Blood"
+node_data$layer_name <- factor(node_data$layer_name,
+                               c("skin surface", "Epidermis",
+                                 "Dermis \n hypodermis",
+                                 "Blood"))
+node_data$cluster <- as.factor(node_data$cluster)
+
+# 5. Plot function
+plot_hierarchical_clustered_network <- function(graph, node_data, edges, show_hulls = TRUE) {
+  layer_names <- data.frame(
+    # y = -seq_len(length(unique(node_data$layer))),
+    y = c(-1, -1.7, -2.9, -4),
+    label = levels(node_data$layer_name)
+  )
+  
+  ggraph(graph, layout = 'manual', x = node_data$x_jitter, y = node_data$y_jitter) +
+    { if (show_hulls) geom_mark_hull(
+      data = node_data,
+      aes(x = x_jitter, y = y_jitter, group = cluster, fill = cluster),
+      alpha = 0.1,
+      concavity = 5,
+      expand = unit(3, "mm"),
+      show.legend = FALSE
+    ) } +
+    geom_edge_link(
+      aes(edge_color = weight),
+    ) +
+    geom_label_repel(
+      data = node_data,
+      aes(x = x_jitter, y = y_jitter, label = label, color = layer_name),
+      size = 3,
+      fontface = "bold",
+      segment.color = 'grey'
+    ) +
+    scale_color_manual(name = "Layers", values = c("#CC79A7",
+                                  "#009E73", 
+                                  "#F68B33", 
+                                  "#388ECC")) +
+    geom_hline(yintercept = c(-1.4, -3.5), color = "gray70", linetype = "dashed") +
+    geom_text(
+      data = layer_names,
+      aes(x = 9, y = y, label = label),
+      hjust = 1,
+      fontface = "bold",
+      size = 4
+    ) +
+    # scale_color_brewer(palette = "Dark2", name = "Cluster") +
+    scale_fill_brewer(palette = "Dark2") +
+    scale_edge_color_gradient2(
+      low = "blue", mid = "white", high = "red",
+      midpoint = 0, limits = c(-1, 1), name = "Correlation"
+    ) +
+    coord_cartesian(xlim = c(0, max(node_data$x) + 2), clip = 'off') +
+    theme_void() +
+    theme(plot.margin = margin(5, 30, 5, 60))
+}
+
+# 6. Plot it
+p1 <- plot_hierarchical_clustered_network(graph, node_data, edges, show_hulls = FALSE)
+ggsave(here::here("results", "integration", "hierarchy_skinblood_crosstalk_mod1.pdf"), p1, height = 5, width = 6)
+```
+
+## component 1
+
+```{r}
+cor_matrix <- cor(a)
+cor_matrix <- cor_matrix[clusters==2, clusters==2]
+diag(cor_matrix) <- 0
+cor_matrix[lower.tri(cor_matrix)] <- 0
+df <- as.data.frame(as.table(cor_matrix))
+colnames(df) <- c("from", "to", "weight")
+links <- df
+links <- links[abs(links$weight) > 0.5, ]
+edges=links
+
+layer_index <- c(1, 2, 2, 3, 3, 4)
+names(layer_index) <- c("skin surface", "E cells", "E genes",
+                        "DH cells", "DH genes", "Blood cells")
+node_names <- as.character(unique(c(edges$from, edges$to)))
+nodes <- data.frame(
+  name = node_names,
+  layer_name = sapply(strsplit(node_names, "_"), function(i) i[[1]]),
+  layer = layer_index[sapply(strsplit(node_names, "_"), function(i) i[[1]])],
+  label = sapply(strsplit(node_names, "_"), function(i) i[[2]])
+)
+
+set.seed(33)
+# 3. Build graph and assign clusters
+graph <- tbl_graph(nodes = nodes, edges = edges, directed = FALSE) %>%
+  mutate(cluster = group_louvain(resolution = 0.1))
+
+# 4. Extract node info, include cluster and layer info
+node_data <- graph %>%
+  as_tibble() %>%
+  mutate(name = V(graph)$name) %>%
+  left_join(nodes[, c("name", "layer")], by = c("name", "layer")) %>%
+  group_by(layer) %>%
+  mutate(
+    n_clusters = n_distinct(cluster),
+    cluster_id = as.numeric(as.factor(cluster))
+  ) %>%
+  group_by(layer, cluster) %>%
+  mutate(
+    cluster_size = n(),
+    node_rank = row_number()
+  ) %>%
+  ungroup() %>%
+  # Assign horizontal position:
+  mutate(
+    # total width allocated per layer:
+    layer_width = 7,
+    # width per cluster (leave small gap between clusters)
+    cluster_width = layer_width / n_clusters,
+    # start position of cluster block within layer's horizontal space
+    cluster_start = (cluster_id - 1) * cluster_width,
+    # spread nodes evenly within cluster block from cluster_start to cluster_start + cluster_width
+    x = cluster_start + (node_rank - 0.5) * (cluster_width / cluster_size),
+    y = -layer,
+    x_jitter = x + runif(n(), -0.4, 0.4),
+    y_jitter = y + runif(n(), -0.4, 0.4)
+  )
+node_data$layer_name[node_data$layer_name %in% c("E cells", "E genes")] <- "Epidermis"
+node_data$layer_name[node_data$layer_name %in% c("DH cells", "DH genes")] <- "Dermis \n hypodermis"
+node_data$layer_name[node_data$layer_name %in% c("Blood cells")] <- "Blood"
+node_data$layer_name <- factor(node_data$layer_name,
+                               c("skin surface", "Epidermis",
+                                 "Dermis \n hypodermis",
+                                 "Blood"))
+node_data$cluster <- as.factor(node_data$cluster)
+
+# 5. Plot function
+plot_hierarchical_clustered_network <- function(graph, node_data, edges, show_hulls = TRUE) {
+  layer_names <- data.frame(
+    # y = -seq_len(length(unique(node_data$layer))),
+    y = c(-1, -1.7, -2.9, -4),
+    label = levels(node_data$layer_name)
+  )
+  
+  ggraph(graph, layout = 'manual', x = node_data$x_jitter, y = node_data$y_jitter) +
+    { if (show_hulls) geom_mark_hull(
+      data = node_data,
+      aes(x = x_jitter, y = y_jitter, group = cluster, fill = cluster),
+      alpha = 0.1,
+      concavity = 5,
+      expand = unit(3, "mm"),
+      show.legend = FALSE
+    ) } +
+    geom_edge_link(
+      aes(edge_color = weight),
+    ) +
+    geom_label_repel(
+      data = node_data,
+      aes(x = x_jitter, y = y_jitter, label = label, color = layer_name),
+      size = 3,
+      fontface = "bold",
+      segment.color = 'grey'
+    ) +
+    scale_color_manual(name = "Layers", values = c("#CC79A7",
+                                  "#009E73", 
+                                  "#F68B33", 
+                                  "#388ECC")) +
+    geom_hline(yintercept = c(-1.4, -3.5), color = "gray70", linetype = "dashed") +
+    geom_text(
+      data = layer_names,
+      aes(x = 9, y = y, label = label),
+      hjust = 1,
+      fontface = "bold",
+      size = 4
+    ) +
+    # scale_color_brewer(palette = "Dark2", name = "Cluster") +
+    scale_fill_brewer(palette = "Dark2") +
+    scale_edge_color_gradient2(
+      low = "blue", mid = "white", high = "red",
+      midpoint = 0, limits = c(-1, 1), name = "Correlation"
+    ) +
+    coord_cartesian(xlim = c(0, max(node_data$x) + 2), clip = 'off') +
+    theme_void() +
+    theme(plot.margin = margin(5, 30, 5, 60))
+}
+
+# 6. Plot it
+p2 <- plot_hierarchical_clustered_network(graph, node_data, edges, show_hulls = FALSE)
+ggsave(here::here("results", "integration", "hierarchy_skinblood_crosstalk_mod2.pdf"), p2, height = 5, width = 8)
+```

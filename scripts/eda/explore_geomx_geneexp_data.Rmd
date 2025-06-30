@@ -1,0 +1,56 @@
+---
+title: "explore_geomx_geneexp_data"
+author: "Amrit Singh"
+date: "June 30, 2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+
+source(here::here("scripts", "eda", "eda_helperfunctions.R"))
+geom_eset <- readRDS(here::here("data", "processed", "geomx_eset.rds"))
+phenodata <- geom_eset$phenodata
+q3norm <- geom_eset$eset
+```
+
+## PCA plot (color by vaccine status)
+
+## Full ROI
+
+```{r}
+segment <- "Full ROI"
+pcs <- compute_pcs(pdata = phenodata, eset = q3norm, segments = segment)
+p1 <- plot_pcs(pcs = pcs, segments = segment, col_by = type_day)
+ggsave(here::here("results", "eda", "pca_geomx_fullroi.png"), 
+       p1, height = 3.8, width = 4)
+p1
+```
+
+### Cell-markers
+
+```{r}
+segments <- c("CD3", "CD31", "CD68")
+pcs <- compute_pcs(pdata = phenodata, eset = q3norm, segments = segments)
+p2 <- plot_pcs(pcs = pcs, segments = segments, col_by = type_day)
+ggsave(here::here("results", "eda", "pca_geomx_cellmarkers.png"), 
+       p2, height = 4)
+p2
+```
+
+
+## PCA plot (color by bacterial status)
+
+### all segments
+
+```{r}
+segments <- c("Full ROI", "CD3", "CD31", "CD68")
+pcs <- compute_pcs(pdata = phenodata, eset = q3norm, segments = segments)
+p3 <- plot_pcs(pcs = pcs, segments = segments, col_by = bacteria)
+ggsave(here::here("results", "eda", "pca_geomx_allsegments_bacStatus.png"), 
+       p3, height = 4, width=5.5)
+p3
+```
+
+

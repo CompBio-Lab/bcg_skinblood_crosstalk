@@ -1,0 +1,144 @@
+---
+title: "Data preprocessing"
+author: "Amrit Singh"
+date: "June 30, 2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse);
+library(limma)
+source(here::here("scripts", "helper_functions.R"))
+```
+
+# Clinical data
+
+```{r}
+clinical <- read.csv(here::here("data", "raw", "bcginsitu_metadata_combined.csv"))
+rownames(clinical) <- clinical$samplenumber
+
+## remove clinical variables with greater than 60% of missing data
+clinical <- clinical[, colSums(!is.na(clinical))/nrow(clinical) > 0.6] %>% 
+  mutate(timepoint = factor(ifelse(visit == "BASELINE", 0, Day))) %>% 
+  mutate(type_day = paste(Vaccination, timepoint, sep="_"))
+clinical$type_day[grep("Placebo", clinical$type_day)] <- "Placebo"
+keep_clinical_var <- apply(data.matrix(clinical), 2, sd, na.rm = TRUE) > 0
+keep_clinical_var <- names(keep_clinical_var[!is.na(keep_clinical_var) & keep_clinical_var > 0])
+clinical <- clinical[, keep_clinical_var]
+```
+
+# Dermatoscopic image data
+
+## dermatoscope images
+
+```{r}
+dermatoscopic_images <- read.csv(here::here("data", "raw", "alexnet_images.csv"), row.names = 1)[rownames(clinical), ]
+colnames(dermatoscopic_images) <- make.unique(colnames(dermatoscopic_images))
+all(rownames(clinical) == rownames(dermatoscopic_images))
+```
+
+
+# GeoMx
+
+## metadata
+
+```{r}
+phenodata <- na.omit(xlsx::read.xlsx(here::here("data", "raw", "phenodata_updated v2.xlsx"), sheetName = "Sheet1")) %>% 
+  mutate(bis = gsub("_", "", section)) %>% 
+  mutate(section = ifelse(bacteria == "pos",
+                          paste0(section, "(+)"),
+                          paste0(section, "(-)")))  
+phenodata$tissue[phenodata$tissue == "Dermis"]  <- "Dermis+Hypodermis"
+phenodata$tissue[phenodata$tissue == "Hypodermis"]  <- "Dermis+Hypodermis"
+phenodata$type_day <- paste(phenodata$type, phenodata$day, sep = "_")
+phenodata$type_day[grep("placebo", phenodata$type_day)] <- "Placebo"
+phenodata$bis <- gsub("_|\\(|\\+|\\-|\\)", "", phenodata$section)
+phenodata$slide.name <- gsub("207_1", "207", phenodata$slide.name)
+rownames(phenodata) <- gsub(" ", "", paste0(phenodata$slide.name, phenodata$roi, phenodata$segment))
+
+epi_phenodata <- subset(phenodata, tissue == "Epidermis" & segment == "Full ROI")
+derm_hypoderm_phenodata <- subset(phenodata, tissue == "Dermis+Hypodermis" & segment == "Full ROI")
+
+subj <- phenodata %>% 
+  dplyr::select(section, day, bacteria, type) %>% 
+  group_by(section, day, bacteria, type) %>% 
+  slice(1)
+```
+
+## gene-expression data
+
+```{r}
+q3norm <- log2(as.matrix(read.csv(here::here("data", "raw", "geomx_q3norm.csv"), row.names = 1)))
+colnames(q3norm) <- gsub("DNA|Other|other|Syto83", "other", colnames(q3norm))
+colnames(q3norm) <- gsub("others", "other", colnames(q3norm))
+colnames(q3norm) <- gsub("\\.", "", colnames(q3norm))
+q3norm <- q3norm[, rownames(phenodata)]
+all(rownames(phenodata) == colnames(q3norm))
+
+```
+
+
+# cfRNA data
+
+```{r}
+cfrna_metadata <- as.data.frame(readxl::read_xlsx(here::here( "data", "raw", "SV18901_raw_read_file_information.xlsx"), sheet = "Sheet1"))
+rownames(cfrna_metadata) <- cfrna_metadata$`Norgen ID`
+cfrna_eset <- read.csv(here::here("data", "raw", "Genes-detected-per-sample-counts-at-1.csv"), row.names = 1)
+colnames(cfrna_eset) <- cfrna_metadata[colnames(cfrna_eset), "Sample ID"]
+rownames(cfrna_eset) <- make.unique(rownames(cfrna_eset))
+
+all(rownames(clinical) == colnames(cfrna_eset))
+dim(clinical); dim(cfrna_eset)
+hist(as.matrix(cfrna_eset))
+
+```
+
+### save kegg colors
+
+```{r}
+dbs <- readRDS(here::here("data", "annotations", "dbs.rds"))
+
+library(RColorBrewer)
+
+keggpathways <- dbs$kegg %>%
+  dplyr::select(-data) %>%
+  as.data.frame()
+rownames(keggpathways) <- keggpathways$pathway
+
+level2 <- unique(keggpathways$level2)
+
+set.seed(325)
+level2_colors0 <- c(RColorBrewer::brewer.pal(9, "Set1"),
+                   RColorBrewer::brewer.pal(8, "Set2"),
+                   RColorBrewer::brewer.pal(12, "Set3"),
+                   RColorBrewer::brewer.pal(12, "Paired"),
+                   RColorBrewer::brewer.pal(8, "Dark2"),
+                   RColorBrewer::brewer.pal(8, "Accent"))
+level2_colors <- sample(level2_colors0, length(level2))
+names(level2_colors) <- level2
+saveRDS(level2_colors, here::here("results", "de", "kegg_colors.rds"))
+
+```
+
+
+### save data
+
+```{r}
+## clinical data
+saveRDS(clinical, here::here("data", "processed", "clinical.rds"))
+
+## dermatoscopic images
+saveRDS(dermatoscopic_images, here::here("data", "processed", "dermatoscopic_images.rds"))
+
+## GeoMx gene-expression data
+geomx_eset <- list(eset = q3norm,
+                  phenodata = phenodata)
+saveRDS(geomx_eset, here::here("data", "processed", "geomx_eset.rds"))
+
+## cfRNA
+cfrna <- list(eset = as.matrix(cfrna_eset),
+              clinical = cfrna_metadata)
+saveRDS(cfrna, here::here("data", "processed", "cfrna.rds"))
+
+```
