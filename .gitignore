@@ -44,6 +44,7 @@ vignettes/*.pdf
 # data and docs
 data/
 docs/
+results/
 
 # translation temp files
 po/*~
