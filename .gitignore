@@ -6,6 +6,7 @@
 .RData
 .RDataTmp
 .DS_Store
+scripts/.ipynb_checkpoints/
 
 # User-specific files
 .Ruserdata
