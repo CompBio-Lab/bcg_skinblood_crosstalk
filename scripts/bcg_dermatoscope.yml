@@ -1,4 +1,4 @@
-name: /Users/asingh/Documents/cbl/collabs/kollmann/bcg_insitu/scripts/images/bcg_images
+name: bcg_images
 channels:
   - conda-forge
   - defaults
